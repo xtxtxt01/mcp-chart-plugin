@@ -1,0 +1,41 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "extract_chart_facts",
+      "description": "从参考资料中提取知识点，严格返回 knowledges 数组。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "knowledges": {
+            "type": "array",
+            "description": "基于原文抽取的知识点列表。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "insight": {
+                  "type": "string",
+                  "description": "基于片段提炼的知识点，无效内容不输出。"
+                },
+                "snippets": {
+                  "type": "array",
+                  "description": "引用的原始文档编号，如 \"0\"、\"3\"。",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "insight",
+                "snippets"
+              ]
+            }
+          }
+        },
+        "required": [
+          "knowledges"
+        ]
+      }
+    }
+  }
+]

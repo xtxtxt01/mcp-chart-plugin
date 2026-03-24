@@ -1,0 +1,697 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from ..clients.agg_search import AggSearchClient
+from ..clients.llm import SecureLLMClient, ToolCallResult
+from ..config import DemoConfig
+from ..core.baseline_decider import decide_chart_spec
+from ..core.renderer import render_chart_artifacts
+from ..schemas.function_schemas import extract_chart_facts_tools, plan_chart_retrieval_tools
+
+
+def _compact(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in [None, ""]:
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except Exception:
+        return None
+
+
+def _safe_int(value: Any) -> int | None:
+    number = _safe_float(value)
+    return int(number) if number is not None else None
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = _compact(value)
+        if not item:
+            continue
+        key = item.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _config_from_dict(config_dict: dict[str, Any] | None) -> DemoConfig:
+    cfg = DemoConfig()
+    for key, value in (config_dict or {}).items():
+        if hasattr(cfg, key):
+            setattr(cfg, key, value)
+    return cfg
+
+
+def _fallback_queries(task: dict[str, Any], config: DemoConfig) -> list[str]:
+    queries: list[str] = []
+    queries.extend([str(item) for item in (task.get("base_queries") or []) if _compact(item)])
+    for field in ["chart_title", "chart_description"]:
+        value = _compact(task.get(field))
+        if value:
+            queries.append(value)
+    return _ordered_unique(queries)[: config.chart_max_queries]
+
+
+def _normalize_knowledge(item: dict[str, Any]) -> dict[str, Any]:
+    insight = _compact(item.get("insight"))
+    if not insight:
+        return {}
+    snippets = item.get("snippets")
+    normalized_snippets: list[str] = []
+    if isinstance(snippets, list):
+        for snippet in snippets:
+            value = _compact(snippet)
+            if value:
+                normalized_snippets.append(value)
+    return {
+        "insight": insight,
+        "snippets": normalized_snippets,
+    }
+
+
+def _knowledge_signature(item: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
+    return (
+        _compact(item.get("insight")),
+        tuple(str(snippet) for snippet in item.get("snippets") or []),
+    )
+
+
+def merge_and_dedupe_knowledges(knowledges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for raw_item in knowledges:
+        item = _normalize_knowledge(raw_item)
+        if not item:
+            continue
+        signature = _knowledge_signature(item)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        result.append(item)
+    return result
+
+
+def _existing_refs_to_knowledges(task: dict[str, Any]) -> list[dict[str, Any]]:
+    knowledges: list[dict[str, Any]] = []
+    for idx, ref in enumerate(task.get("existing_refs") or []):
+        content = _compact(ref.get("content"))
+        if not content:
+            continue
+        source_index = _safe_int(ref.get("id"))
+        knowledges.append(
+            {
+                "insight": content,
+                "snippets": [str(source_index if source_index is not None else idx)],
+            }
+        )
+    return merge_and_dedupe_knowledges(knowledges)
+
+
+def _knowledge_doc(item: dict[str, Any], prompt_id: int, *, source_kind: str) -> dict[str, Any]:
+    insight = _compact(item.get("insight"))
+    return {
+        "prompt_id": prompt_id,
+        "source_kind": source_kind,
+        "source_index": prompt_id,
+        "title": f"{source_kind}_{prompt_id}",
+        "summary": insight[:240],
+        "content": insight,
+        "url": "",
+        "query": "",
+        "query_index": -1,
+    }
+
+
+def _knowledge_docs(
+    existing_knowledges: list[dict[str, Any]],
+    new_knowledges: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    prompt_id = 0
+    for item in existing_knowledges:
+        docs.append(_knowledge_doc(item, prompt_id, source_kind="existing_knowledge"))
+        prompt_id += 1
+    for item in new_knowledges or []:
+        docs.append(_knowledge_doc(item, prompt_id, source_kind="live_knowledge"))
+        prompt_id += 1
+    return docs
+
+
+def _knowledge_preview(knowledges: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    preview: list[dict[str, Any]] = []
+    for idx, item in enumerate(knowledges[:limit]):
+        preview.append(
+            {
+                "index": idx,
+                "insight": _compact(item.get("insight"))[:240],
+                "snippets": [str(snippet) for snippet in (item.get("snippets") or [])],
+            }
+        )
+    return preview
+
+
+def _build_gap_report(task: dict[str, Any], spec: dict[str, Any], knowledges: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "chart_title": _compact(task.get("chart_title")),
+        "chart_description": _compact(task.get("chart_description")),
+        "first_attempt_chart_tag": _compact(spec.get("chart_tag") or "empty"),
+        "failure_reason": _compact(spec.get("explain") or spec.get("_decision_error")),
+        "decision_mode": _compact(spec.get("_decision_mode") or "unknown"),
+        "existing_knowledge_count": len(knowledges),
+        "existing_knowledge_preview": _knowledge_preview(knowledges),
+        "first_attempt_raw_output": _compact(spec.get("_decision_raw_output") or spec.get("_raw_output"))[:1200],
+    }
+
+
+def _build_query_planning_prompt(task: dict[str, Any], gap_report: dict[str, Any] | None = None) -> str:
+    ref_preview = []
+    for idx, ref in enumerate(task.get("existing_refs") or []):
+        ref_preview.append(
+            {
+                "id": _safe_int(ref.get("id")) if _safe_int(ref.get("id")) is not None else idx,
+                "content_preview": _compact(ref.get("content"))[:240],
+            }
+        )
+
+    gap_section = ""
+    if gap_report:
+        gap_section = (
+            "## 第一次成图失败情况\n"
+            f"{json.dumps(gap_report, ensure_ascii=False, indent=2)}\n\n"
+            "## 额外要求\n"
+            "- 你需要结合第一次失败原因，判断还缺哪些关键数据字段。\n"
+            "- 本轮 queries 应优先补齐缺口，不要重复搜索已经充分存在的信息。\n"
+            "- notes 里请明确写出：第一次为什么没能成图、本轮重点要补什么。\n\n"
+        )
+
+    return (
+        "# 角色\n"
+        "图表检索规划专家：基于图表任务、已有知识点和第一次成图失败原因，规划补充检索查询，目标是尽快补齐成图所需数据。\n\n"
+        "## 核心原则\n"
+        "- 只围绕成图直接需要的数据来规划，不做泛泛分析。\n"
+        "- 优先补实体、指标、时间、地域、维度等缺口。\n"
+        "- queries 要聚焦、可执行，避免空泛表述。\n"
+        "- 如果上游已有 query 足够好，可以直接复用或轻微改写。\n\n"
+        "## 图表任务\n"
+        f"- 图表标题：{_compact(task.get('chart_title'))}\n"
+        f"- 图表描述：{_compact(task.get('chart_description'))}\n"
+        f"- 写作要求：{_compact(task.get('write_requirement'))}\n\n"
+        "## 已有基础 queries\n"
+        f"{json.dumps(task.get('base_queries') or [], ensure_ascii=False, indent=2)}\n\n"
+        "## 已有上游 insights 预览\n"
+        f"{json.dumps(ref_preview, ensure_ascii=False, indent=2)}\n\n"
+        + gap_section
+        + "## 输出要求\n"
+        "- comparison_mode 仅从 compare/trend/share/flow/hierarchy/funnel/multidim/other 中选择。\n"
+        "- queries 返回 3 到 8 条，且语言与任务一致。\n"
+        "- intent 中的 entities、metrics、dimensions 只写你能从任务中明确识别到的内容。\n"
+    )
+
+
+def _normalize_retrieval_plan(
+    task: dict[str, Any],
+    config: DemoConfig,
+    tool_result: ToolCallResult | None,
+) -> dict[str, Any]:
+    raw = tool_result.arguments if tool_result and isinstance(tool_result.arguments, dict) else {}
+    intent_raw = raw.get("intent") if isinstance(raw.get("intent"), dict) else {}
+    queries_raw = raw.get("queries") if isinstance(raw.get("queries"), list) else []
+
+    plan = {
+        "intent": {
+            "comparison_mode": _compact(intent_raw.get("comparison_mode")) or "other",
+            "entities": [str(item) for item in intent_raw.get("entities", []) if _compact(item)],
+            "metrics": [str(item) for item in intent_raw.get("metrics", []) if _compact(item)],
+            "dimensions": [str(item) for item in intent_raw.get("dimensions", []) if _compact(item)],
+            "chart_type_hints": [str(item) for item in intent_raw.get("chart_type_hints", []) if _compact(item)],
+            "must_have_fields": [str(item) for item in intent_raw.get("must_have_fields", []) if _compact(item)],
+            "time_hints": [str(item) for item in intent_raw.get("time_hints", []) if _compact(item)],
+            "region_hints": [str(item) for item in intent_raw.get("region_hints", []) if _compact(item)],
+            "query_language": _compact(intent_raw.get("query_language") or task.get("language") or "zh"),
+        },
+        "queries": [str(item) for item in queries_raw if _compact(item)],
+        "notes": _compact(raw.get("notes")),
+    }
+
+    if not plan["queries"]:
+        plan["queries"] = _fallback_queries(task, config)
+        plan["_planning_mode"] = "fallback_queries"
+    else:
+        plan["queries"] = _ordered_unique(plan["queries"])[: config.chart_max_queries]
+        plan["_planning_mode"] = "llm"
+
+    plan["_planning_error"] = _compact(tool_result.error if tool_result else "")
+    plan["_planning_raw_output"] = _compact(tool_result.content if tool_result else "")
+    return plan
+
+
+def plan_chart_retrieval(
+    task: dict[str, Any],
+    config: DemoConfig,
+    gap_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    llm = SecureLLMClient(config)
+    result: ToolCallResult | None = None
+    if llm.available()[0]:
+        result = llm.call_with_tools(
+            system_prompt="你是图表检索规划专家。请根据图表任务、已有知识点和失败原因，优先使用 function calling 返回补检索计划。",
+            user_prompt=_build_query_planning_prompt(task, gap_report=gap_report),
+            tools=plan_chart_retrieval_tools(),
+            tool_name="plan_chart_retrieval",
+            temperature=0.0,
+        )
+    return _normalize_retrieval_plan(task, config, result)
+
+
+def expand_queries(task: dict[str, Any], retrieval_plan: dict[str, Any], config: DemoConfig) -> list[str]:
+    queries = [str(item) for item in (retrieval_plan.get("queries") or []) if _compact(item)]
+    if not queries:
+        queries = _fallback_queries(task, config)
+    return _ordered_unique(queries)[: config.chart_max_queries]
+
+
+def _existing_ref_doc(ref: dict[str, Any], fallback_index: int) -> dict[str, Any]:
+    source_index = _safe_int(ref.get("id"))
+    content = _compact(ref.get("content"))
+    return {
+        "source_kind": "existing_ref",
+        "source_index": source_index if source_index is not None else fallback_index,
+        "title": f"existing_ref_{source_index if source_index is not None else fallback_index}",
+        "summary": content[:240],
+        "content": content,
+        "url": "",
+        "query": "",
+        "query_index": -1,
+    }
+
+
+def _live_doc(doc: dict[str, Any], *, query: str, query_index: int) -> dict[str, Any]:
+    title = _compact(doc.get("name") or doc.get("title"))
+    summary = _compact(doc.get("summary") or doc.get("snippet") or doc.get("abstract"))
+    content = _compact(doc.get("content") or doc.get("text") or summary or title)
+    url = _compact(doc.get("url") or doc.get("link"))
+    return {
+        "source_kind": "live_search",
+        "source_index": None,
+        "title": title or f"live_search_doc_{query_index}",
+        "summary": summary[:400],
+        "content": content,
+        "url": url,
+        "query": _compact(query),
+        "query_index": query_index,
+    }
+
+
+def search_documents(task: dict[str, Any], queries: list[str], config: DemoConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    documents: list[dict[str, Any]] = []
+    for idx, ref in enumerate(task.get("existing_refs") or []):
+        documents.append(_existing_ref_doc(ref, idx))
+
+    client = AggSearchClient(config)
+    results = client.search_many(queries, request_id=_compact(task.get("request_id")))
+
+    live_overview: list[dict[str, Any]] = []
+    for result in results:
+        raw_docs = result.get("documents") or []
+        for doc in raw_docs:
+            documents.append(
+                _live_doc(
+                    doc,
+                    query=result.get("query", ""),
+                    query_index=int(result.get("query_index") or 0),
+                )
+            )
+        live_overview.append(
+            {
+                "query_index": result.get("query_index"),
+                "query": result.get("query"),
+                "success": bool(result.get("success")),
+                "status_code": result.get("status_code"),
+                "document_count": len(raw_docs),
+                "top_titles": [_compact(doc.get("name") or doc.get("title")) for doc in raw_docs[:3]],
+                "error": _compact(result.get("error")),
+            }
+        )
+    return documents, results, live_overview
+
+
+def _doc_identity(doc: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        _compact(doc.get("title")).casefold(),
+        _compact(doc.get("url")).casefold(),
+        _compact(doc.get("content"))[:160].casefold(),
+    )
+
+
+def prepare_docs_for_extraction(
+    documents: list[dict[str, Any]],
+    retrieval_plan: dict[str, Any],
+    task: dict[str, Any],
+    config: DemoConfig,
+) -> list[dict[str, Any]]:
+    del retrieval_plan
+    del task
+
+    if not documents:
+        return []
+
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for doc in documents[: config.chart_live_docs_quota]:
+        identity = _doc_identity(doc)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        selected.append(dict(doc))
+
+    for idx, doc in enumerate(selected):
+        doc["prompt_id"] = idx
+    return selected
+
+
+def _doc_payload_for_extraction(doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "doc_index": _safe_int(doc.get("prompt_id")),
+        "title": _compact(doc.get("title")),
+        "content": _compact(doc.get("content"))[:1800],
+    }
+
+
+def _build_fact_extraction_prompt(task: dict[str, Any], retrieval_plan: dict[str, Any], docs: list[dict[str, Any]]) -> str:
+    del retrieval_plan
+
+    doc_blocks: list[str] = []
+    for item in docs:
+        payload = _doc_payload_for_extraction(item)
+        doc_blocks.append(
+            f"【文档索引 {payload['doc_index']}】\n标题: {payload['title']}\n内容: {payload['content']}"
+        )
+
+    chart_title = _compact(task.get("chart_title"))
+    chart_requirement_parts = [
+        _compact(task.get("chart_description")),
+        _compact(task.get("write_requirement")),
+    ]
+    chart_requirement = "\n".join([part for part in chart_requirement_parts if part])
+
+    return (
+        "# 角色\n"
+        "信息提取专家：从参考资料中提取**有助于回复用户需求**的事实，并组织为结构化知识点。\n"
+        "  \n"
+        "## 核心原则\n"
+        "- **只用原文**：严格基于原文抽取知识，不得编造、推测或添加原文未提及信息\n"
+        "  - 不同范围的信息禁止混淆，局部信息不得扩展为更大范围。如：中国市场的增长趋势不得混为“全球趋势”。\n"
+        "- **意图相关**：提取与需求主题相关、范围（如主体/时间/地域/人群等）覆盖的片段\n"
+        "  - 若存在指代或者主体范围不明确，结合上下文补全，仍不明确丢弃，**不要受用户需求影响强加范围**\n"
+        "  - 部分文档片段可能无法直接回答整个需求，**但只要对需求的一个维度有贡献，即可被收录**\n"
+        "- **事实完整**：每个知识点必须包含明确主体和关键信息（数据、时间、条件等），信息不完整则舍弃\n"
+        "- **内容有效**：忽略无关内容和空洞表述（如目录、标题、碎片化词条），禁止输出无效知识点（如“文档未提及”）\n\n"
+        "## 执行流程\n"
+        "1. 识别用户需求的核心主题和关键信息，确定筛选维度\n"
+        "2. 逐句筛选符合条件的内容，相同事实合并为一个\n"
+        "3. 将筛选后的片段构建为表述完整的知识点 insight\n\n"
+        "## 字段规范\n"
+        "- **insight**：严格基于原文抽取，**主体明确、信息脉络清晰**，包含数据、时间、背景等关键要素，不完整则不生成该知识点\n"
+        "- **snippets字段**：引用的原始文档编号（如 \"0\"、\"3\"）。\n\n"
+        " ## 输出规范\n"
+        "- 严格按照以下 JSON 结构输出，禁止额外说明或新增字段\n"
+        "- 若无符合条件的片段，直接输出空数组` \"knowledges\":[]`\n\n"
+        "```json\n"
+        "{\n"
+        "  \"knowledges\": [\n"
+        "    {\n"
+        "      \"insight\": \"基于片段提炼的知识点，无效内容不输出\",\n"
+        "      \"snippets\": [\n"
+        "        \"1\"\n"
+        "      ]\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "```\n\n"
+        "## 参考资料\n"
+        + "\n\n".join(doc_blocks)
+        + "\n\n## 用户需求\n"
+        + f"- 写作主题：{chart_title}\n"
+        + f"- 写作需求：{chart_requirement}"
+    )
+
+
+def extract_facts(
+    task: dict[str, Any],
+    docs: list[dict[str, Any]],
+    retrieval_plan: dict[str, Any],
+    config: DemoConfig,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    llm = SecureLLMClient(config)
+    tool_result: ToolCallResult | None = None
+    llm_knowledges: list[dict[str, Any]] = []
+    if docs and llm.available()[0]:
+        tool_result = llm.call_with_tools(
+            system_prompt="请严格遵守用户消息中的抽取说明，并优先使用 function calling 返回 JSON。",
+            user_prompt=_build_fact_extraction_prompt(task, retrieval_plan, docs),
+            tools=extract_chart_facts_tools(),
+            tool_name="extract_chart_facts",
+            temperature=0.0,
+        )
+        if tool_result.ok and isinstance(tool_result.arguments, dict):
+            llm_knowledges = [item for item in (tool_result.arguments.get("knowledges") or []) if isinstance(item, dict)]
+
+    merged = merge_and_dedupe_knowledges(llm_knowledges)
+    debug = {
+        "llm_only_mode": True,
+        "llm_knowledge_count": len(llm_knowledges),
+        "merged_knowledge_count": len(merged),
+        "llm_error": _compact(tool_result.error if tool_result else ""),
+        "llm_ok": bool(tool_result.ok) if tool_result else False,
+        "llm_raw_output": _compact(tool_result.content if tool_result else ""),
+    }
+    return merged, debug
+
+
+def _brief_reference(doc: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "prompt_id": _safe_int(doc.get("prompt_id")),
+        "source_kind": _compact(doc.get("source_kind")),
+        "source_index": _safe_int(doc.get("source_index")),
+        "title": _compact(doc.get("title")),
+        "summary": _compact(doc.get("summary"))[:240],
+        "url": _compact(doc.get("url")),
+        "query": _compact(doc.get("query")),
+    }
+
+
+def _skipped_retrieval_plan(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "intent": {
+            "comparison_mode": "unknown",
+            "entities": [],
+            "metrics": [],
+            "dimensions": [],
+            "chart_type_hints": [],
+            "must_have_fields": [],
+            "time_hints": [],
+            "region_hints": [],
+            "query_language": _compact(task.get("language") or "zh"),
+        },
+        "queries": [],
+        "notes": "First pass used existing insights directly, so agg retrieval planning was skipped.",
+        "_planning_mode": "skipped_existing_insights",
+        "_planning_error": "",
+        "_planning_raw_output": "",
+    }
+
+
+def _needs_agg_retry(spec: dict[str, Any]) -> bool:
+    chart_tag = _compact(spec.get("chart_tag")).casefold()
+    if chart_tag in {"", "empty", "null"}:
+        return True
+    chart_data = spec.get("chart_data")
+    return chart_data in [None, {}]
+
+
+def _attempt_snapshot(
+    *,
+    stage: str,
+    retrieval_plan: dict[str, Any],
+    queries: list[str],
+    docs_for_extraction: list[dict[str, Any]],
+    docs_for_generation: list[dict[str, Any]],
+    knowledges: list[dict[str, Any]],
+    extraction_debug: dict[str, Any],
+    spec: dict[str, Any],
+    used_agg_search: bool,
+    live_hits_count: int,
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "used_agg_search": used_agg_search,
+        "planning_mode": _compact(retrieval_plan.get("_planning_mode")),
+        "query_count": len(queries),
+        "live_hits_count": live_hits_count,
+        "docs_for_extraction_count": len(docs_for_extraction),
+        "docs_for_generation_count": len(docs_for_generation),
+        "knowledge_count": len(knowledges),
+        "chart_tag": _compact(spec.get("chart_tag") or "empty"),
+        "decision_mode": _compact(spec.get("_decision_mode") or "unknown"),
+        "extraction_debug": extraction_debug,
+    }
+
+
+def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = _config_from_dict(config_dict)
+    task = dict(review_payload)
+
+    generation_attempts: list[dict[str, Any]] = []
+    gap_report: dict[str, Any] | None = None
+
+    existing_knowledges = _existing_refs_to_knowledges(task)
+    initial_retrieval_plan = _skipped_retrieval_plan(task)
+    initial_queries: list[str] = []
+    initial_search_results: list[dict[str, Any]] = []
+    initial_live_search_overview: list[dict[str, Any]] = []
+    initial_docs_for_extraction: list[dict[str, Any]] = []
+    initial_docs_for_generation = _knowledge_docs(existing_knowledges)
+    initial_extraction_debug = {
+        "llm_only_mode": True,
+        "llm_skipped": True,
+        "passthrough_existing_knowledges": True,
+        "existing_knowledge_count": len(existing_knowledges),
+        "llm_knowledge_count": 0,
+        "merged_knowledge_count": len(existing_knowledges),
+        "llm_error": "",
+        "llm_ok": False,
+        "llm_raw_output": "",
+    }
+    initial_spec = decide_chart_spec(
+        task,
+        existing_knowledges,
+        config=config,
+        docs=initial_docs_for_generation,
+        retrieval_plan=initial_retrieval_plan,
+    )
+    generation_attempts.append(
+        _attempt_snapshot(
+            stage="existing_insights_only",
+            retrieval_plan=initial_retrieval_plan,
+            queries=initial_queries,
+            docs_for_extraction=initial_docs_for_extraction,
+            docs_for_generation=initial_docs_for_generation,
+            knowledges=existing_knowledges,
+            extraction_debug=initial_extraction_debug,
+            spec=initial_spec,
+            used_agg_search=False,
+            live_hits_count=0,
+        )
+    )
+
+    if _needs_agg_retry(initial_spec):
+        gap_report = _build_gap_report(task, initial_spec, existing_knowledges)
+        retrieval_plan = plan_chart_retrieval(task, config, gap_report=gap_report)
+        queries = expand_queries(task, retrieval_plan, config)
+        documents, search_results, live_search_overview = search_documents(task, queries, config)
+        live_documents = [doc for doc in documents if doc.get("source_kind") == "live_search"]
+        docs_for_extraction = prepare_docs_for_extraction(live_documents, retrieval_plan, task, config)
+        new_knowledges, extraction_debug = extract_facts(task, docs_for_extraction, retrieval_plan, config)
+        knowledges = merge_and_dedupe_knowledges(existing_knowledges + new_knowledges)
+        docs_for_generation = _knowledge_docs(existing_knowledges, new_knowledges)
+        spec = decide_chart_spec(
+            task,
+            knowledges,
+            config=config,
+            docs=docs_for_generation,
+            retrieval_plan=retrieval_plan,
+        )
+        live_hits_count = sum(len(result.get("documents") or []) for result in search_results)
+        generation_attempts.append(
+            _attempt_snapshot(
+                stage="existing_insights_plus_live_insights",
+                retrieval_plan=retrieval_plan,
+                queries=queries,
+                docs_for_extraction=docs_for_extraction,
+                docs_for_generation=docs_for_generation,
+                knowledges=knowledges,
+                extraction_debug=extraction_debug,
+                spec=spec,
+                used_agg_search=True,
+                live_hits_count=live_hits_count,
+            )
+        )
+    else:
+        retrieval_plan = initial_retrieval_plan
+        queries = initial_queries
+        search_results = initial_search_results
+        live_search_overview = initial_live_search_overview
+        docs_for_extraction = initial_docs_for_extraction
+        docs_for_generation = initial_docs_for_generation
+        knowledges = existing_knowledges
+        extraction_debug = initial_extraction_debug
+        spec = initial_spec
+        live_hits_count = 0
+
+    title = _compact(task.get("chart_title") or task.get("chart_description") or "Chart")
+    render_result = render_chart_artifacts(spec, _compact(task.get("request_id")), title)
+
+    decision_mode = _compact(spec.get("_decision_mode") or "unknown")
+    decision_error = _compact(spec.get("_decision_error"))
+    decision_raw_output = _compact(spec.get("_decision_raw_output") or spec.get("_raw_output"))
+    extraction_refs = [_brief_reference(doc) for doc in docs_for_extraction]
+    generation_refs = [_brief_reference(doc) for doc in docs_for_generation]
+
+    return {
+        "success": True,
+        "markdown": render_result["markdown"],
+        "relative_path": render_result["svg_path"],
+        "chart_tag": _compact(spec.get("chart_tag") or "empty"),
+        "retrieval_plan": retrieval_plan,
+        "queries": queries,
+        "search_results": search_results,
+        "live_search_overview": live_search_overview,
+        "docs_for_extraction": extraction_refs,
+        "docs_for_generation": generation_refs,
+        "knowledges": knowledges,
+        "facts": knowledges,
+        "references": generation_refs,
+        "extraction_debug": extraction_debug,
+        "chart_decision_debug": {
+            "decision_mode": decision_mode,
+            "decision_error": decision_error,
+            "decision_raw_output": decision_raw_output,
+        },
+        "generation_attempts": generation_attempts,
+        "retry_gap_report": gap_report,
+        "debug_summary": {
+            "query_count": len(queries),
+            "existing_refs_count": len(task.get("existing_refs") or []),
+            "live_hits_count": live_hits_count,
+            "docs_for_extraction_count": len(docs_for_extraction),
+            "docs_for_generation_count": len(docs_for_generation),
+            "knowledge_count": len(knowledges),
+            "chart_tag": _compact(spec.get("chart_tag") or "empty"),
+            "decision_mode": decision_mode,
+            "used_agg_search": bool(live_hits_count),
+            "attempt_count": len(generation_attempts),
+            "final_stage": _compact(generation_attempts[-1].get("stage")) if generation_attempts else "",
+        },
+        **render_result,
+    }
+
+
+__all__ = [
+    "plan_chart_retrieval",
+    "expand_queries",
+    "search_documents",
+    "prepare_docs_for_extraction",
+    "extract_facts",
+    "merge_and_dedupe_knowledges",
+    "generate_chart_markdown",
+]

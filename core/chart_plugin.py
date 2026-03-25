@@ -46,9 +46,7 @@ def _ordered_unique(values: list[str]) -> list[str]:
 
 def _config_from_dict(config_dict: dict[str, Any] | None) -> DemoConfig:
     cfg = DemoConfig()
-    for key, value in (config_dict or {}).items():
-        if hasattr(cfg, key):
-            setattr(cfg, key, value)
+    cfg.apply_overrides(config_dict)
     return cfg
 
 
@@ -260,7 +258,7 @@ def plan_chart_retrieval(
     config: DemoConfig,
     gap_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    llm = SecureLLMClient(config)
+    llm = SecureLLMClient(config, stage="planning")
     result: ToolCallResult | None = None
     if llm.available()[0]:
         result = llm.call_with_tools(
@@ -452,7 +450,7 @@ def extract_facts(
     retrieval_plan: dict[str, Any],
     config: DemoConfig,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    llm = SecureLLMClient(config)
+    llm = SecureLLMClient(config, stage="extraction")
     tool_result: ToolCallResult | None = None
     llm_knowledges: list[dict[str, Any]] = []
     if docs and llm.available()[0]:

@@ -4,7 +4,6 @@ from .app.server import main, mcp, server
 
 __all__ = [
     "config",
-    "data",
     "clients",
     "core",
     "schemas",

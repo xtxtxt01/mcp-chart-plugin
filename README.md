@@ -1,52 +1,57 @@
-# Chart Plugin MCP Demo
+# Chart Plugin MCP
 
-一个面向 `review -> chart plugin` 场景整理过的 MCP Demo。  
-它的目标是：
+一个面向 `review -> chart plugin` 场景的正式 MCP。
 
-- 在 review 阶段接收图表任务
-- 优先利用上游已经沉淀好的 `existing_refs`
-- 如果第一次无法成图，再补做 aggSearch
-- 用 LLM 完成检索规划、insight 抽取、图表决策
-- 返回可直接插入报告的 markdown 图片引用
+它的职责只有一件事：
 
-当前 MCP tool 的典型输出是：
+- 接收上游直接传入的 `review_payload`
+- 先利用 `existing_refs` 尝试成图
+- 如首轮失败，再结合 `base_queries` 做补充检索和二次生成
+- 返回可直接插入报告的 Markdown 图片引用和相对路径
 
-```md
-![图表标题](artifacts/charts/{request_id}/chart_01.png)
+典型返回中的核心字段是：
+
+```json
+{
+  "success": true,
+  "markdown": "![图表标题](artifacts/charts/case-001/chart_01.png)",
+  "relative_path": "artifacts/charts/case-001/chart_01.png",
+  "chart_tag": "radar",
+  "debug_summary": {
+    "used_agg_search": false,
+    "attempt_count": 1,
+    "final_stage": "existing_insights_only"
+  }
+}
 ```
 
 说明：
 
-- `relative_path` / `markdown` 返回的是相对 `MCP_demo/` 根目录的路径
-- 如果本机可用无头 Edge/Chrome，会优先导出 `chart_01.png`
-- 如果浏览器导出失败，会回退到静态 `chart_01.svg`
+- `markdown` 和 `relative_path` 返回的是相对 `MCP_demo/` 根目录的路径
+- 最终图片优先导出为 `chart_01.png`
+- 如果本机无头 Edge/Chrome 不可用，才回退为 `chart_01.svg`
 
-## 当前主流程
+## 当前流程
 
-现在的真实流程不是“一次检索一次出图”，而是两阶段尝试：
+### 第一轮：只用上游已有信息
 
-### 第一轮：只用上游已有 insights
-
-1. 从 csv/log 回放里拿到：
-   - `chart_title`
-   - `chart_description`
-   - `write_requirement`
-   - `existing_refs`
-   - `base_queries`
-2. 把 `existing_refs` 直接视为上游已有 insight
-3. 不重新抽取这批 `existing_refs`
+1. 上游直接传入 `review_payload`
+2. 将 `existing_refs` 视为上游已有 insights
+3. 不对 `existing_refs` 重复做一轮信息抽取
 4. 直接调用 baseline prompt + LLM 生成图表
 
-### 第二轮：失败后再补检索
+### 第二轮：首轮失败后补检索
 
-只有第一轮结果是 `empty` 或图表数据无效时，才进入第二轮：
+只有当第一轮结果为 `empty` 或图表数据无效时，才进入第二轮：
 
-1. 基于以下信息做 LLM retrieval planning：
+1. 基于以下信息做 LLM query planning：
+   - 图表标题
    - 图表描述
+   - 写作要求
    - `base_queries`
-   - 第一轮失败原因
-   - 已有 insight 预览
-2. 调 aggSearch
+   - 首轮失败原因
+   - 已有 insights 预览
+2. 调用 aggSearch
 3. 保留：
    - 全部 `existing_refs`
    - live docs top 10
@@ -54,24 +59,8 @@
 5. 合并：
    - existing insights
    - live insights
-6. 再调用一次 baseline prompt + LLM 生成图表
-7. 渲染出最终图片、html 预览和 markdown
-
-可以概括成：
-
-```text
-csv/log replay
--> first pass: existing_refs only
--> chart generation
--> if empty:
-   -> LLM gap-aware query planning
-   -> aggSearch
-   -> live-doc insight extraction
-   -> existing insights + live insights
-   -> chart generation again
--> render
--> markdown
-```
+6. 再调用 baseline prompt + LLM 生成图表
+7. 渲染最终图片、html 预览和 markdown
 
 ## 目录结构
 
@@ -79,7 +68,6 @@ csv/log replay
 MCP_demo/
   app/
     server.py
-    demo_runner.py
   clients/
     agg_search.py
     llm.py
@@ -87,9 +75,6 @@ MCP_demo/
     chart_plugin.py
     baseline_decider.py
     renderer.py
-  data/
-    csv_cases.py
-    review_payloads.py
   schemas/
     function_schemas.py
     extract_chart_facts.tools.json
@@ -99,22 +84,20 @@ MCP_demo/
   vendor/
     render_utils.py
     md2html.py
-  artifacts/
-  outputs/
   config.py
   pyproject.toml
   .env.example
+  README.md
+  HANDOFF.md
 ```
 
-## 各层职责
+## 目录职责
 
 ### `app/`
 
 - `server.py`
   - MCP server 入口
-  - 注册 tools / resources
-- `demo_runner.py`
-  - 本地单 case 回放入口
+  - 注册正式 tool 和 schema resources
 
 ### `clients/`
 
@@ -123,44 +106,37 @@ MCP_demo/
 - `llm.py`
   - LLM 客户端
   - 优先 function calling
-  - 模型不兼容时退到文本 JSON 解析
+  - 模型不兼容时退回文本 JSON 解析
 
 ### `core/`
 
 - `chart_plugin.py`
-  - 整个插件主流程
-  - 两阶段尝试逻辑
-  - insight 合并
-  - gap-aware retrieval planning
+  - 插件主流程
+  - 两阶段生成逻辑
+  - knowledges 合并
+  - gap-aware query planning
 - `baseline_decider.py`
-  - 直接加载原始 `baseline_chart_prompt.txt`
-  - 用 LLM 输出 XML 图表决策
+  - 直接加载 `assets/baseline_chart_prompt.txt`
+  - 使用 LLM 输出图表 XML
 - `renderer.py`
   - 生成 `.txt/.json/.html`
   - 生成最终图片
   - 优先基于同一份 ECharts option 用无头浏览器导出 PNG
-  - 浏览器不可用时回退到静态 SVG
-
-### `data/`
-
-- `csv_cases.py`
-  - 从日志 csv 中回放 case
-- `review_payloads.py`
-  - 组装 demo 用的 review payload
+  - 浏览器不可用时回退到 SVG
 
 ### `schemas/`
 
 - `function_schemas.py`
   - function calling schema 定义
 - `plan_chart_retrieval.tools.json`
-  - 查询规划 schema
+  - query planning schema
 - `extract_chart_facts.tools.json`
-  - insight 抽取 schema
+  - knowledges 抽取 schema
 
 ### `assets/`
 
 - `baseline_chart_prompt.txt`
-  - 原始图表生成 prompt
+  - 原始中文图表生成 prompt
   - 当前直接作为图表生成 LLM prompt 使用
 
 ### `vendor/`
@@ -172,27 +148,118 @@ MCP_demo/
 
 ## MCP 暴露内容
 
-### Tools
+### Tool
 
 - `generate_chart_markdown`
-  - 输入：review 阶段图表任务 payload
-  - 输出：
-    - `markdown`
-    - `relative_path`
-    - `chart_tag`
-    - `debug_summary`
-    - `generation_attempts`
-    - `retry_gap_report`
-    - 以及调试字段
 
-- `build_review_payload_demo`
-  - 输入：`file_name` + `row_id`
-  - 输出：本地回放用的 review payload
+输入：
+
+- `review_payload`
+- 可选 `config`
 
 ### Resources
 
 - `resource://schemas/plan_chart_retrieval`
 - `resource://schemas/extract_chart_facts`
+
+## 输入契约
+
+正式接入时，上游必须直接传入 `review_payload`。
+
+### 必填字段
+
+- `request_id`
+  - 本次图表请求唯一标识
+- `chart_title`
+  - 图表标题
+- `chart_description`
+  - 图表想表达的核心可视化目标
+- `existing_refs`
+  - 上游已有参考资料或已抽取的 insights 列表
+- `write_requirement`
+  - 本章/本节写作要求
+- `base_queries`
+  - 基础检索 queries，用于首轮失败后补检索
+
+### `existing_refs` 格式
+
+`existing_refs` 是一个数组，每项至少建议包含：
+
+```json
+{
+  "id": 0,
+  "content": "已有参考资料或上游抽取结果"
+}
+```
+
+字段约定：
+
+- `id`
+  - 可选，整数或可转整数的标识
+- `content`
+  - 必填，文本内容
+
+### `base_queries` 格式
+
+`base_queries` 是字符串数组，例如：
+
+```json
+[
+  "2026 海信 RGB Mini LED 分区数 亮度 色域",
+  "2026 TCL SQD Mini LED 分区数 亮度 色域"
+]
+```
+
+### 最小输入示例
+
+```json
+{
+  "review_payload": {
+    "request_id": "case-001",
+    "chart_title": "对比海信与TCL在2026年主导的两种Mini LED技术路线的核心画质参数差异",
+    "chart_description": "对比海信与TCL在2026年主导的两种Mini LED技术路线的核心画质参数差异，直观展示其在分区、亮度、色域等关键指标上的技术分化。",
+    "write_requirement": "请生成一张可直接插入报告的图表。",
+    "existing_refs": [
+      {
+        "id": 0,
+        "content": "TCL在2026年推出SQD-Mini LED技术，98英寸版本配备20736个万象分区，峰值亮度突破10000nits，实现100% BT.2020全局高色域覆盖。"
+      },
+      {
+        "id": 1,
+        "content": "海信在2026年主打RGB-Mini LED技术，峰值亮度为7000-9000nits，色域覆盖为100-110% BT.2020。"
+      }
+    ],
+    "base_queries": [
+      "2026 海信 RGB Mini LED 分区数 亮度 色域",
+      "2026 TCL SQD Mini LED 分区数 亮度 色域"
+    ]
+  }
+}
+```
+
+## 输出字段
+
+当前返回中最常用的字段包括：
+
+- `success`
+- `markdown`
+- `relative_path`
+- `chart_tag`
+- `debug_summary`
+
+同时还会返回调试字段，例如：
+
+- `retrieval_plan`
+- `queries`
+- `live_search_overview`
+- `docs_for_extraction`
+- `docs_for_generation`
+- `knowledges`
+- `references`
+- `extraction_debug`
+- `chart_decision_debug`
+- `generation_attempts`
+- `retry_gap_report`
 
 ## LLM 使用方式
 
@@ -204,9 +271,8 @@ MCP_demo/
    - function calling 优先
 
 2. `extract_chart_facts`
-   - 实际输出结构现在是：
-     - `knowledges[]`
-   - prompt 采用你前链路的信息提取专家中文版式
+   - 实际输出结构为 `knowledges[]`
+   - prompt 使用中文“信息提取专家”模板
    - function calling 优先
 
 3. 图表生成
@@ -216,49 +282,29 @@ MCP_demo/
 
 ## 渲染行为
 
-现在有两类输出：
+会产出两类文件：
 
 ### 1. `outputs/*.html`
 
-- 这是 ECharts 真预览
-- 使用 `vendor/render_utils.py` 里的 option 生成
+- ECharts 真预览
+- 由 `vendor/render_utils.py` 的 option 生成
 
 ### 2. `artifacts/charts/{request_id}/chart_01.png|svg`
 
-- 这是最终 markdown 引用的图片
-- 现在优先走：
-  - 同一份 ECharts option
-  - 无头 Edge/Chrome 截图导出 PNG
-- 浏览器不可用时才回退到 SVG
+- 最终 markdown 引用的图表文件
+- 优先使用同一份 ECharts option 经无头 Edge/Chrome 导出 PNG
+- 浏览器不可用时回退到 SVG
 
-因此：
+因此，新生成的 case 中：
 
-- 新跑出来的 case，`html` 和最终图片应该尽量保持一致
-- 如果你看到旧的 `chart_01.svg` 和 html 不一致，通常是历史产物，需要重新跑该 case
+- `outputs/*.html`
+- `artifacts/charts/.../chart_01.png`
+
+应尽量保持一致。
 
 ## 运行方式
 
-### 1. 本地 demo
-
-先开 SSH 隧道：
-
-```powershell
-ssh -L 18080:dx-cbm-ocp-agg-search-inner.xf-yun.com:80 awmao@172.16.154.251
-```
-
-再在 `C:\Users\xtyu9\Desktop\日志报告` 下运行：
-
-```powershell
-python -m MCP_demo.app.demo_runner
-```
-
-指定 csv 和 row：
-
-```powershell
-python -m MCP_demo.app.demo_runner --file-name "会计专科岗位_discover search.csv" --row-id 150
-```
-
-### 2. MCP server 模式
+### 1. 启动 MCP server
 
 ```powershell
 python -m MCP_demo
@@ -270,7 +316,7 @@ python -m MCP_demo
 python -m MCP_demo.app.server
 ```
 
-### 3. 作为可安装项目使用
+### 2. 作为可安装项目使用
 
 在 `MCP_demo/` 目录下：
 
@@ -282,7 +328,6 @@ pip install -e .
 
 ```powershell
 chart-plugin-mcp
-chart-plugin-mcp-demo --file-name "会计专科岗位_discover search.csv" --row-id 150
 ```
 
 ## 配置
@@ -297,7 +342,7 @@ chart-plugin-mcp-demo --file-name "会计专科岗位_discover search.csv" --row
 - `MCP_DEMO_AGG_TIMEOUT_MS`
 - `MCP_DEMO_AGG_TOP_K`
 
-### retrieval / extraction
+### retrieval / generation
 
 - `MCP_DEMO_MAX_QUERIES`
 - `MCP_DEMO_MAX_DOCS`
@@ -307,9 +352,8 @@ chart-plugin-mcp-demo --file-name "会计专科岗位_discover search.csv" --row
 说明：
 
 - 当前主流程实际采用的是：
-  - existing refs 全保留
-  - live docs top 10
-- `MCP_DEMO_MAX_DOCS` 目前更多是保留字段
+  - `existing_refs` 全保留
+  - `live docs` top 10
 
 ### LLM
 
@@ -326,15 +370,15 @@ chart-plugin-mcp-demo --file-name "会计专科岗位_discover search.csv" --row
 
 ## 输出目录
 
-### 最终图片
+### 最终图表文件
 
-在：
+位于：
 
 ```text
 artifacts/charts/{request_id}/chart_01.png
 ```
 
-或浏览器导出失败时：
+如浏览器导出失败，则可能是：
 
 ```text
 artifacts/charts/{request_id}/chart_01.svg
@@ -342,49 +386,96 @@ artifacts/charts/{request_id}/chart_01.svg
 
 ### 调试产物
 
-在 `outputs/` 下：
+位于 `outputs/`：
 
-- `demo-{case}__demo_summary.json`
-  - 整次运行摘要
 - `mcp_demo_chart__{request_id}.txt`
-  - 原始 XML
 - `mcp_demo_chart__{request_id}.json`
-  - 结构化图表结果
 - `mcp_demo_chart__{request_id}.html`
-  - ECharts 真预览
 
 ## 最值得看的调试字段
 
-在 `demo_summary.json` 里，优先看：
+如果你要定位某次成图过程，优先看：
 
-- `retrieval_plan`
-- `knowledges`
-- `docs_for_extraction`
-- `docs_for_generation`
 - `generation_attempts`
 - `retry_gap_report`
-- `chart_decision_debug`
 - `debug_summary`
+- `chart_decision_debug`
+- `docs_for_extraction`
+- `docs_for_generation`
+- `knowledges`
 
 其中：
 
 - `generation_attempts`
-  - 能看出第一轮是不是只用 existing insights
-  - 第二轮是不是补了 aggSearch
+  - 能看出首轮是否只用了 existing insights
+  - 第二轮是否补了 aggSearch
 - `retry_gap_report`
-  - 能看出第一次没成图的原因
+  - 能看出第一次成图失败的原因
 - `debug_summary.final_stage`
   - 能看出最终停在哪一轮
 
-## 当前项目状态
+## 分阶段 LLM 配置
 
-这套 demo 现在已经满足：
+当前支持为三个环节分别配置不同的 LLM：
 
-- 以 MCP tool 形式对外提供图表插件能力
-- review 阶段可调用
-- 返回 markdown 图片引用
-- 图片路径为相对路径
-- 支持本地 demo 回放
-- 支持 aggSearch + LLM + baseline prompt 的完整链路
+- `planning`
+- `extraction`
+- `chart_generation`
 
+如果没有单独配置某个环节，则自动回退到全局默认 LLM 配置。
 
+### 环境变量方式
+
+除全局默认值外，还支持：
+
+- `MCP_DEMO_LLM_PLANNING_BASE_URL`
+- `MCP_DEMO_LLM_PLANNING_API_KEY`
+- `MCP_DEMO_LLM_PLANNING_MODEL`
+- `MCP_DEMO_LLM_PLANNING_TIMEOUT_S`
+- `MCP_DEMO_LLM_PLANNING_REQUIRE_HTTPS`
+- `MCP_DEMO_LLM_PLANNING_FORCE_FUNCTION_CALL`
+
+- `MCP_DEMO_LLM_EXTRACTION_BASE_URL`
+- `MCP_DEMO_LLM_EXTRACTION_API_KEY`
+- `MCP_DEMO_LLM_EXTRACTION_MODEL`
+- `MCP_DEMO_LLM_EXTRACTION_TIMEOUT_S`
+- `MCP_DEMO_LLM_EXTRACTION_REQUIRE_HTTPS`
+- `MCP_DEMO_LLM_EXTRACTION_FORCE_FUNCTION_CALL`
+
+- `MCP_DEMO_LLM_CHART_BASE_URL`
+- `MCP_DEMO_LLM_CHART_API_KEY`
+- `MCP_DEMO_LLM_CHART_MODEL`
+- `MCP_DEMO_LLM_CHART_TIMEOUT_S`
+- `MCP_DEMO_LLM_CHART_REQUIRE_HTTPS`
+- `MCP_DEMO_LLM_CHART_FORCE_FUNCTION_CALL`
+
+### 运行时 `config` 传参方式
+
+调用 `generate_chart_markdown` 时，也可以在 `config.llm` 中分别传入：
+
+```json
+{
+  "llm": {
+    "planning": {
+      "base_url": "https://a.example.com/v1",
+      "api_key": "sk-planning",
+      "model": "planning-model",
+      "timeout_s": 60,
+      "force_function_call": true
+    },
+    "extraction": {
+      "base_url": "https://b.example.com/v1",
+      "api_key": "sk-extraction",
+      "model": "extraction-model",
+      "timeout_s": 90,
+      "force_function_call": true
+    },
+    "chart_generation": {
+      "base_url": "https://c.example.com/v1",
+      "api_key": "sk-chart",
+      "model": "chart-model",
+      "timeout_s": 90
+    }
+  }
+}
+```

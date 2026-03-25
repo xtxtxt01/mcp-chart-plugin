@@ -165,7 +165,7 @@ def decide_chart_spec(
     del retrieval_plan
 
     cfg = config or DemoConfig()
-    llm = SecureLLMClient(cfg)
+    llm = SecureLLMClient(cfg, stage="chart_generation")
     ok, message = llm.available()
     if not ok:
         return _empty_spec(

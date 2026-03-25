@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from ..config import DemoConfig
+from ..config import DemoConfig, LLMProfile
 
 
 @dataclass(slots=True)
@@ -20,20 +20,28 @@ class ToolCallResult:
 
 
 class SecureLLMClient:
-    def __init__(self, config: DemoConfig | None = None):
+    def __init__(
+        self,
+        config: DemoConfig | None = None,
+        *,
+        stage: str | None = None,
+        profile: LLMProfile | None = None,
+    ):
         self.config = config or DemoConfig()
+        self.stage = stage or "default"
+        self.profile = profile or self.config.llm_profile(self.stage)
 
     def available(self) -> tuple[bool, str]:
-        if not self.config.llm_base_url:
+        if not self.profile.base_url:
             return False, "LLM base URL is empty."
-        parsed = urlparse(self.config.llm_base_url)
+        parsed = urlparse(self.profile.base_url)
         if not parsed.scheme:
             return False, "LLM base URL has no scheme."
-        if self.config.require_https_for_model and parsed.scheme.lower() != "https":
+        if self.profile.require_https_for_model and parsed.scheme.lower() != "https":
             return False, "LLM base URL must use HTTPS."
-        if not self.config.llm_api_key:
+        if not self.profile.api_key:
             return False, "LLM api key is empty."
-        if not self.config.llm_model:
+        if not self.profile.model:
             return False, "LLM model is empty."
         return True, ""
 
@@ -50,7 +58,7 @@ class SecureLLMClient:
         if not ok:
             return ToolCallResult(ok=False, arguments=None, error=message)
 
-        if not self.config.force_function_call:
+        if not self.profile.force_function_call:
             return self._call_structured_via_text(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
@@ -60,7 +68,7 @@ class SecureLLMClient:
             )
 
         payload: dict[str, Any] = {
-            "model": self.config.llm_model,
+            "model": self.profile.model,
             "temperature": temperature,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -73,10 +81,10 @@ class SecureLLMClient:
             },
         }
         headers = {
-            "Authorization": f"Bearer {self.config.llm_api_key}",
+            "Authorization": f"Bearer {self.profile.api_key}",
             "Content-Type": "application/json",
         }
-        url = self.config.llm_base_url.rstrip("/") + "/chat/completions"
+        url = self.profile.base_url.rstrip("/") + "/chat/completions"
 
         primary_error = ""
         try:
@@ -84,7 +92,7 @@ class SecureLLMClient:
                 url,
                 json=payload,
                 headers=headers,
-                timeout=self.config.llm_timeout_s,
+                timeout=self.profile.timeout_s,
             )
             response.raise_for_status()
             data = response.json()
@@ -142,7 +150,7 @@ class SecureLLMClient:
             return ToolCallResult(ok=False, arguments=None, error=message)
 
         payload: dict[str, Any] = {
-            "model": self.config.llm_model,
+            "model": self.profile.model,
             "temperature": temperature,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -150,17 +158,17 @@ class SecureLLMClient:
             ],
         }
         headers = {
-            "Authorization": f"Bearer {self.config.llm_api_key}",
+            "Authorization": f"Bearer {self.profile.api_key}",
             "Content-Type": "application/json",
         }
-        url = self.config.llm_base_url.rstrip("/") + "/chat/completions"
+        url = self.profile.base_url.rstrip("/") + "/chat/completions"
 
         try:
             response = requests.post(
                 url,
                 json=payload,
                 headers=headers,
-                timeout=self.config.llm_timeout_s,
+                timeout=self.profile.timeout_s,
             )
             response.raise_for_status()
             data = response.json()

@@ -3,20 +3,18 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "chart-plugin-mcp-demo"
+name = "chart-plugin-mcp"
 version = "0.1.0"
-description = "Review-stage chart plugin MCP demo with aggSearch retrieval, function-call fact extraction, and baseline-style chart rendering."
+description = "Review-stage chart plugin MCP with aggSearch retrieval, function-call fact extraction, and baseline-style chart rendering."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "mcp==1.17.0",
-  "pandas>=2.2.0",
   "requests>=2.31.0",
 ]
 
 [project.scripts]
 chart-plugin-mcp = "MCP_demo.app.server:main"
-chart-plugin-mcp-demo = "MCP_demo.app.demo_runner:main"
 
 [tool.setuptools]
 packages = [
@@ -24,7 +22,6 @@ packages = [
   "MCP_demo.app",
   "MCP_demo.clients",
   "MCP_demo.core",
-  "MCP_demo.data",
   "MCP_demo.schemas",
   "MCP_demo.vendor",
 ]
@@ -34,7 +31,6 @@ MCP_demo = "."
 MCP_demo.app = "app"
 MCP_demo.clients = "clients"
 MCP_demo.core = "core"
-MCP_demo.data = "data"
 MCP_demo.schemas = "schemas"
 MCP_demo.vendor = "vendor"
 

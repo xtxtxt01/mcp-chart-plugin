@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import Any
 
 from ..clients.llm import SecureLLMClient
-from ..config import BASELINE_PROMPT_PATH, DemoConfig
+from ..config import BASELINE_PROMPT_PATH, CHART_DECISION_USER_PROMPT_PATH, DemoConfig
+from ..prompt_utils import load_text_multi, render_prompt_template
 
 
 SUPPORTED_CHART_TAGS = [
@@ -22,18 +22,8 @@ SUPPORTED_CHART_TAGS = [
 
 EMPTY_CHARTDATA_LITERALS = {"", "{}", "空", "empty", "none", "null", "n/a"}
 
-
-def _load_text_multi(path: Path) -> str:
-    for encoding in ["utf-8", "utf-8-sig", "gb18030", "gbk"]:
-        try:
-            return path.read_text(encoding=encoding)
-        except Exception:
-            continue
-    return path.read_text(encoding="utf-8", errors="ignore")
-
-
 def load_baseline_prompt() -> str:
-    return _load_text_multi(BASELINE_PROMPT_PATH)
+    return load_text_multi(BASELINE_PROMPT_PATH)
 
 
 def _compact(value: Any) -> str:
@@ -126,16 +116,13 @@ def _build_llm_decision_user_prompt(task: dict[str, Any], docs: list[dict[str, A
     description = _compact(task.get("chart_description") or task.get("chart_title"))
     context = _compact(task.get("write_requirement"))
     references = _reference_payload(docs)
-    return (
-        "## 图表描述<description>\n"
-        f"{description}\n\n"
-        "## 上文内容\n"
-        "```markdown\n"
-        f"{context}\n"
-        "```\n\n"
-        "## 参考资料\n"
-        "(如下资料中id为参考资料序号，content为资料内容)\n"
-        f"{json.dumps(references, ensure_ascii=False, indent=2)}"
+    return render_prompt_template(
+        CHART_DECISION_USER_PROMPT_PATH,
+        {
+            "description": description,
+            "context": context,
+            "references_json": json.dumps(references, ensure_ascii=False, indent=2),
+        },
     )
 
 

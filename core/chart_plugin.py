@@ -5,7 +5,16 @@ from typing import Any
 
 from ..clients.agg_search import AggSearchClient
 from ..clients.llm import SecureLLMClient, ToolCallResult
-from ..config import DemoConfig
+from ..config import (
+    DemoConfig,
+    FACT_EXTRACTION_DOCUMENT_BLOCK_PROMPT_PATH,
+    FACT_EXTRACTION_SYSTEM_PROMPT_PATH,
+    FACT_EXTRACTION_USER_PROMPT_PATH,
+    QUERY_PLANNING_GAP_SECTION_PROMPT_PATH,
+    QUERY_PLANNING_SYSTEM_PROMPT_PATH,
+    QUERY_PLANNING_USER_PROMPT_PATH,
+)
+from ..prompt_utils import load_text_multi, render_prompt_template
 from ..core.baseline_decider import decide_chart_spec
 from ..core.renderer import render_chart_artifacts
 from ..schemas.function_schemas import extract_chart_facts_tools, plan_chart_retrieval_tools
@@ -183,36 +192,23 @@ def _build_query_planning_prompt(task: dict[str, Any], gap_report: dict[str, Any
 
     gap_section = ""
     if gap_report:
-        gap_section = (
-            "## 第一次成图失败情况\n"
-            f"{json.dumps(gap_report, ensure_ascii=False, indent=2)}\n\n"
-            "## 额外要求\n"
-            "- 你需要结合第一次失败原因，判断还缺哪些关键数据字段。\n"
-            "- 本轮 queries 应优先补齐缺口，不要重复搜索已经充分存在的信息。\n"
-            "- notes 里请明确写出：第一次为什么没能成图、本轮重点要补什么。\n\n"
+        gap_section = render_prompt_template(
+            QUERY_PLANNING_GAP_SECTION_PROMPT_PATH,
+            {
+                "gap_report_json": json.dumps(gap_report, ensure_ascii=False, indent=2),
+            },
         )
 
-    return (
-        "# 角色\n"
-        "图表检索规划专家：基于图表任务、已有知识点和第一次成图失败原因，规划补充检索查询，目标是尽快补齐成图所需数据。\n\n"
-        "## 核心原则\n"
-        "- 只围绕成图直接需要的数据来规划，不做泛泛分析。\n"
-        "- 优先补实体、指标、时间、地域、维度等缺口。\n"
-        "- queries 要聚焦、可执行，避免空泛表述。\n"
-        "- 如果上游已有 query 足够好，可以直接复用或轻微改写。\n\n"
-        "## 图表任务\n"
-        f"- 图表标题：{_compact(task.get('chart_title'))}\n"
-        f"- 图表描述：{_compact(task.get('chart_description'))}\n"
-        f"- 写作要求：{_compact(task.get('write_requirement'))}\n\n"
-        "## 已有基础 queries\n"
-        f"{json.dumps(task.get('base_queries') or [], ensure_ascii=False, indent=2)}\n\n"
-        "## 已有上游 insights 预览\n"
-        f"{json.dumps(ref_preview, ensure_ascii=False, indent=2)}\n\n"
-        + gap_section
-        + "## 输出要求\n"
-        "- comparison_mode 仅从 compare/trend/share/flow/hierarchy/funnel/multidim/other 中选择。\n"
-        "- queries 返回 3 到 8 条，且语言与任务一致。\n"
-        "- intent 中的 entities、metrics、dimensions 只写你能从任务中明确识别到的内容。\n"
+    return render_prompt_template(
+        QUERY_PLANNING_USER_PROMPT_PATH,
+        {
+            "chart_title": _compact(task.get("chart_title")),
+            "chart_description": _compact(task.get("chart_description")),
+            "write_requirement": _compact(task.get("write_requirement")),
+            "base_queries_json": json.dumps(task.get("base_queries") or [], ensure_ascii=False, indent=2),
+            "ref_preview_json": json.dumps(ref_preview, ensure_ascii=False, indent=2),
+            "gap_section": gap_section,
+        },
     )
 
 
@@ -262,7 +258,7 @@ def plan_chart_retrieval(
     result: ToolCallResult | None = None
     if llm.available()[0]:
         result = llm.call_with_tools(
-            system_prompt="你是图表检索规划专家。请根据图表任务、已有知识点和失败原因，优先使用 function calling 返回补检索计划。",
+            system_prompt=load_text_multi(QUERY_PLANNING_SYSTEM_PROMPT_PATH),
             user_prompt=_build_query_planning_prompt(task, gap_report=gap_report),
             tools=plan_chart_retrieval_tools(),
             tool_name="plan_chart_retrieval",
@@ -392,7 +388,14 @@ def _build_fact_extraction_prompt(task: dict[str, Any], retrieval_plan: dict[str
     for item in docs:
         payload = _doc_payload_for_extraction(item)
         doc_blocks.append(
-            f"【文档索引 {payload['doc_index']}】\n标题: {payload['title']}\n内容: {payload['content']}"
+            render_prompt_template(
+                FACT_EXTRACTION_DOCUMENT_BLOCK_PROMPT_PATH,
+                {
+                    "doc_index": payload["doc_index"],
+                    "title": payload["title"],
+                    "content": payload["content"],
+                },
+            )
         )
 
     chart_title = _compact(task.get("chart_title"))
@@ -402,45 +405,13 @@ def _build_fact_extraction_prompt(task: dict[str, Any], retrieval_plan: dict[str
     ]
     chart_requirement = "\n".join([part for part in chart_requirement_parts if part])
 
-    return (
-        "# 角色\n"
-        "信息提取专家：从参考资料中提取**有助于回复用户需求**的事实，并组织为结构化知识点。\n"
-        "  \n"
-        "## 核心原则\n"
-        "- **只用原文**：严格基于原文抽取知识，不得编造、推测或添加原文未提及信息\n"
-        "  - 不同范围的信息禁止混淆，局部信息不得扩展为更大范围。如：中国市场的增长趋势不得混为“全球趋势”。\n"
-        "- **意图相关**：提取与需求主题相关、范围（如主体/时间/地域/人群等）覆盖的片段\n"
-        "  - 若存在指代或者主体范围不明确，结合上下文补全，仍不明确丢弃，**不要受用户需求影响强加范围**\n"
-        "  - 部分文档片段可能无法直接回答整个需求，**但只要对需求的一个维度有贡献，即可被收录**\n"
-        "- **事实完整**：每个知识点必须包含明确主体和关键信息（数据、时间、条件等），信息不完整则舍弃\n"
-        "- **内容有效**：忽略无关内容和空洞表述（如目录、标题、碎片化词条），禁止输出无效知识点（如“文档未提及”）\n\n"
-        "## 执行流程\n"
-        "1. 识别用户需求的核心主题和关键信息，确定筛选维度\n"
-        "2. 逐句筛选符合条件的内容，相同事实合并为一个\n"
-        "3. 将筛选后的片段构建为表述完整的知识点 insight\n\n"
-        "## 字段规范\n"
-        "- **insight**：严格基于原文抽取，**主体明确、信息脉络清晰**，包含数据、时间、背景等关键要素，不完整则不生成该知识点\n"
-        "- **snippets字段**：引用的原始文档编号（如 \"0\"、\"3\"）。\n\n"
-        " ## 输出规范\n"
-        "- 严格按照以下 JSON 结构输出，禁止额外说明或新增字段\n"
-        "- 若无符合条件的片段，直接输出空数组` \"knowledges\":[]`\n\n"
-        "```json\n"
-        "{\n"
-        "  \"knowledges\": [\n"
-        "    {\n"
-        "      \"insight\": \"基于片段提炼的知识点，无效内容不输出\",\n"
-        "      \"snippets\": [\n"
-        "        \"1\"\n"
-        "      ]\n"
-        "    }\n"
-        "  ]\n"
-        "}\n"
-        "```\n\n"
-        "## 参考资料\n"
-        + "\n\n".join(doc_blocks)
-        + "\n\n## 用户需求\n"
-        + f"- 写作主题：{chart_title}\n"
-        + f"- 写作需求：{chart_requirement}"
+    return render_prompt_template(
+        FACT_EXTRACTION_USER_PROMPT_PATH,
+        {
+            "doc_blocks": "\n\n".join(doc_blocks),
+            "chart_title": chart_title,
+            "chart_requirement": chart_requirement,
+        },
     )
 
 
@@ -455,7 +426,7 @@ def extract_facts(
     llm_knowledges: list[dict[str, Any]] = []
     if docs and llm.available()[0]:
         tool_result = llm.call_with_tools(
-            system_prompt="请严格遵守用户消息中的抽取说明，并优先使用 function calling 返回 JSON。",
+            system_prompt=load_text_multi(FACT_EXTRACTION_SYSTEM_PROMPT_PATH),
             user_prompt=_build_fact_extraction_prompt(task, retrieval_plan, docs),
             tools=extract_chart_facts_tools(),
             tool_name="extract_chart_facts",

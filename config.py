@@ -18,6 +18,13 @@ VENDOR_ROOT = MCP_DEMO_ROOT / "vendor"
 MD2HTML_PATH = VENDOR_ROOT / "md2html.py"
 
 BASELINE_PROMPT_PATH = ASSETS_ROOT / "baseline_chart_prompt.txt"
+QUERY_PLANNING_SYSTEM_PROMPT_PATH = ASSETS_ROOT / "query_planning_system_prompt.txt"
+QUERY_PLANNING_USER_PROMPT_PATH = ASSETS_ROOT / "query_planning_user_prompt.txt"
+QUERY_PLANNING_GAP_SECTION_PROMPT_PATH = ASSETS_ROOT / "query_planning_gap_section.txt"
+FACT_EXTRACTION_SYSTEM_PROMPT_PATH = ASSETS_ROOT / "fact_extraction_system_prompt.txt"
+FACT_EXTRACTION_USER_PROMPT_PATH = ASSETS_ROOT / "fact_extraction_user_prompt.txt"
+FACT_EXTRACTION_DOCUMENT_BLOCK_PROMPT_PATH = ASSETS_ROOT / "fact_extraction_document_block.txt"
+CHART_DECISION_USER_PROMPT_PATH = ASSETS_ROOT / "chart_decision_user_prompt.txt"
 RENDER_UTILS_PATH = VENDOR_ROOT / "render_utils.py"
 
 LOG_HELPER_ROOT = WORKSPACE_ROOT

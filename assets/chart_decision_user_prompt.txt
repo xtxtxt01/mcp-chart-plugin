@@ -1,0 +1,11 @@
+## 图表描述<description>
+{{description}}
+
+## 上文内容
+```markdown
+{{context}}
+```
+
+## 参考资料
+(如下资料中id为参考资料序号，content为资料内容)
+{{references_json}}

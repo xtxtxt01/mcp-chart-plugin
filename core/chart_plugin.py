@@ -11,7 +11,7 @@ from ..config import (
 )
 from ..prompt_utils import load_text_multi
 from ..core.baseline_decider import decide_chart_spec
-from ..core.renderer import render_chart_artifacts
+from ..core.renderer import build_no_chart_result, render_chart_artifacts
 from ..schemas.function_schemas import plan_chart_retrieval_tools
 
 
@@ -417,6 +417,10 @@ def _needs_agg_retry(spec: dict[str, Any]) -> bool:
     return chart_data in [None, {}]
 
 
+def _is_empty_chart(spec: dict[str, Any]) -> bool:
+    return _compact(spec.get("chart_tag")).casefold() in {"", "empty", "null"}
+
+
 def _attempt_snapshot(
     *,
     stage: str,
@@ -519,11 +523,17 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
         live_hits_count = 0
 
     title = _compact(task.get("chart_title") or task.get("chart_description") or "Chart")
-    render_result = render_chart_artifacts(spec, _compact(task.get("request_id")), title)
+    chart_tag = _compact(spec.get("chart_tag") or "empty")
+    is_empty_chart = _is_empty_chart(spec)
+    if is_empty_chart:
+        render_result = build_no_chart_result(spec, _compact(task.get("request_id")), title)
+    else:
+        render_result = render_chart_artifacts(spec, _compact(task.get("request_id")), title)
 
     decision_mode = _compact(spec.get("_decision_mode") or "unknown")
     decision_error = _compact(spec.get("_decision_error"))
     decision_raw_output = _compact(spec.get("_decision_raw_output") or spec.get("_raw_output"))
+    empty_reason = _compact(spec.get("explain") or decision_error)
     selected_live_doc_refs = [_brief_reference(doc) for doc in selected_live_docs]
     generation_refs = [_brief_reference(doc) for doc in docs_for_generation]
 
@@ -531,7 +541,9 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
         "success": True,
         "markdown": render_result["markdown"],
         "relative_path": render_result["relative_path"],
-        "chart_tag": _compact(spec.get("chart_tag") or "empty"),
+        "chart_tag": chart_tag,
+        "should_insert": not is_empty_chart,
+        "empty_reason": empty_reason if is_empty_chart else "",
         "retrieval_plan": retrieval_plan,
         "queries": queries,
         "search_results": search_results,
@@ -555,7 +567,7 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
             "selected_live_docs_count": len(selected_live_docs),
             "docs_for_generation_count": len(docs_for_generation),
             "knowledge_count": len(knowledges),
-            "chart_tag": _compact(spec.get("chart_tag") or "empty"),
+            "chart_tag": chart_tag,
             "decision_mode": decision_mode,
             "used_agg_search": len(generation_attempts) > 1,
             "attempt_count": len(generation_attempts),

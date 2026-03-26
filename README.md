@@ -1,14 +1,14 @@
 # Chart Plugin MCP
 
-一个面向 `review -> chart generation` 场景的正式 MCP。
+用于 `review -> chart generation` 场景的标准 `stdio` 型 MCP。
 
-它接收上游直接传入的 `review_payload`，优先基于已有 `existing_refs` 直接成图；如果首轮失败，则最多补搜 1 轮，并将 `existing insights + top3 live docs` 一起送入第二次图表生成，最终返回可直接插入报告的 Markdown 图片引用。
+它接收上游直接传入的 `review_payload`，优先基于已有 `existing_refs` 直接成图；如果首轮失败，则最多补搜 1 轮，并将 `existing insights + top3 live docs` 一起送入第二次图表生成。最终返回可直接插入报告的 Markdown 图片引用、PNG 相对路径，以及调试信息。
 
 ## 1. 当前能力边界
 
 - 只暴露一个正式 tool：`generate_chart_markdown`
 - 只暴露一个 schema resource：`resource://schemas/plan_chart_retrieval`
-- 整条链路最多两次 LLM 调用：
+- 整条链路最多两次 LLM 调用
   - query planning
   - chart generation
 - 只使用一套共享 LLM 配置
@@ -16,6 +16,7 @@
 - 第二轮只保留去重后的 top3 live docs
 - 不再做 live docs 文档抽取
 - 最终产物只保留 PNG，不再保留 SVG
+- 非空图表会尽量显式标出数值，便于直接插入报告
 
 ## 2. MCP 暴露内容
 
@@ -53,7 +54,50 @@ pip install -e .
 chart-plugin-mcp
 ```
 
-## 4. 输入契约
+## 4. 运行前提
+
+运行这版 MCP 需要：
+
+1. 一套可用的共享 LLM 配置
+2. 可访问的 aggSearch endpoint
+3. 本机可用的无头 Edge/Chrome，用于将图表截图导出为 PNG
+
+说明：
+
+- aggSearch endpoint 通过环境变量配置
+- PNG 导出依赖本机浏览器可执行文件
+
+## 5. 环境变量
+
+### LLM
+
+- `MCP_DEMO_LLM_BASE_URL`
+- `MCP_DEMO_LLM_API_KEY`
+- `MCP_DEMO_LLM_MODEL`
+- `MCP_DEMO_LLM_TIMEOUT_S`
+- `MCP_DEMO_REQUIRE_HTTPS`
+- `MCP_DEMO_FORCE_FUNCTION_CALL`
+
+### aggSearch
+
+- `MCP_DEMO_AGG_HOST`
+- `MCP_DEMO_AGG_HOST_HEADER`
+- `MCP_DEMO_AGG_PIPELINE`
+- `MCP_DEMO_AGG_TIMEOUT_MS`
+- `MCP_DEMO_AGG_TOP_K`
+
+### 其他
+
+- `MCP_DEMO_MAX_QUERIES`
+- `MCP_DEMO_LIVE_DOCS_QUOTA`
+- `MCP_DEMO_RENDER_TIMEOUT_S`
+- `MCP_DEMO_RENDER_VIRTUAL_TIME_BUDGET_MS`
+
+示例可参考：
+
+- `.env.example`
+
+## 6. 输入契约
 
 正式接入时，上游必须直接传入 `review_payload`。
 
@@ -108,12 +152,13 @@ chart-plugin-mcp
     "base_queries": [
       "基础检索 query 1",
       "基础检索 query 2"
-    ]
+    ],
+    "language": "zh"
   }
 }
 ```
 
-## 5. 输出契约
+## 7. 输出契约
 
 典型输出中的核心字段如下：
 
@@ -123,7 +168,12 @@ chart-plugin-mcp
   "markdown": "![图表标题](artifacts/charts/case-001/chart_01.png)",
   "relative_path": "artifacts/charts/case-001/chart_01.png",
   "chart_tag": "radar",
+  "should_insert": true,
+  "empty_reason": "",
   "debug_summary": {
+    "query_count": 0,
+    "live_hits_count": 0,
+    "selected_live_docs_count": 0,
     "used_agg_search": false,
     "attempt_count": 1,
     "final_stage": "existing_insights_only"
@@ -136,7 +186,19 @@ chart-plugin-mcp
 - `markdown`
 - `relative_path`
 - `chart_tag`
+- `should_insert`
+- `empty_reason`
 - `debug_summary`
+
+### `empty` 语义
+
+- 当 `chart_tag == "empty"` 时，MCP 不再返回可插入图片
+- 此时：
+  - `markdown == ""`
+  - `relative_path == ""`
+  - `should_insert == false`
+  - `empty_reason` 会返回不成图原因
+- 上游应据此跳过插图，而不是插入说明性占位图
 
 ### 常见调试字段
 
@@ -150,7 +212,7 @@ chart-plugin-mcp
 - `generation_attempts`
 - `retry_gap_report`
 
-## 6. 当前主流程
+## 8. 当前主流程
 
 ### 第一轮
 
@@ -169,7 +231,30 @@ chart-plugin-mcp
 4. 将 `existing insights + top3 live docs` 一起送入第二次图表生成
 5. 输出最终 PNG 图表
 
-## 7. LLM 配置
+## 9. `used_agg_search` 与补搜命中语义
+
+`debug_summary.used_agg_search` 的含义是：
+
+- 是否触发了第二轮补搜流程
+
+它不代表：
+
+- 一定搜到了文档
+
+真正表示补搜是否拿回新文档的是：
+
+- `debug_summary.live_hits_count`
+- `debug_summary.selected_live_docs_count`
+- `live_search_overview[*].document_count`
+
+也就是说，完全可能出现：
+
+- `used_agg_search = true`
+- 但 `live_hits_count = 0`
+
+这表示“补搜流程触发了，但没有拿到任何新文档”。
+
+## 10. LLM 配置
 
 当前只使用一套共享 LLM 配置。
 
@@ -177,15 +262,6 @@ chart-plugin-mcp
 
 - query planning
 - chart generation
-
-### 环境变量
-
-- `MCP_DEMO_LLM_BASE_URL`
-- `MCP_DEMO_LLM_API_KEY`
-- `MCP_DEMO_LLM_MODEL`
-- `MCP_DEMO_LLM_TIMEOUT_S`
-- `MCP_DEMO_REQUIRE_HTTPS`
-- `MCP_DEMO_FORCE_FUNCTION_CALL`
 
 ### 运行时通过 `config.llm` 覆盖
 
@@ -209,20 +285,23 @@ chart-plugin-mcp
 - `config.llm` 可以直接传一套共享配置
 - 如果调用方仍传旧的分阶段结构，当前实现会取其中第一套可用配置作为共享 LLM 使用
 
-## 8. aggSearch 配置
+## 11. aggSearch 配置
 
-- `MCP_DEMO_AGG_HOST`
-- `MCP_DEMO_AGG_HOST_HEADER`
-- `MCP_DEMO_AGG_PIPELINE`
-- `MCP_DEMO_AGG_TIMEOUT_MS`
-- `MCP_DEMO_AGG_TOP_K`
+aggSearch 请求由：
 
-说明：
+- `clients/agg_search.py`
 
-- 当前仓库已经内置 aggSearch client
-- 运行环境仍需能访问配置好的 aggSearch endpoint
+直接发往配置好的 endpoint。
 
-## 9. 渲染与产物
+
+## 12. 渲染与产物
+
+### 渲染方式
+
+- 非空图表会先生成 ECharts option
+- 再通过本机无头 Edge/Chrome 打开临时 HTML 并截图成 PNG
+- `outputs/*.html` 主要用于调试和预览
+- 正式插入报告时，以上游消费 `markdown` / `relative_path` 为准
 
 ### 输出目录
 
@@ -231,12 +310,13 @@ chart-plugin-mcp
 - `artifacts/charts/{request_id}/`
   - 最终图表图片 `chart_01.png`
 
-### 渲染行为
+## 13. 本地测试说明
 
-- PNG 导出依赖运行环境里本机无头 Edge/Chrome
-- 如果本机没有可用 Edge/Chrome，PNG 导出会直接报错
+- `data/` 目录仅用于本地 CSV 回放和 case 调试
+- 正式接入不依赖 `data/`
+- 仓库默认不会上传 `data/`、`outputs/`、`artifacts/`
 
-## 10. 主要目录
+## 14. 主要目录
 
 ```text
 MCP_demo/
@@ -265,15 +345,15 @@ MCP_demo/
   HANDOFF.md
 ```
 
-## 11. 建议重点查看的调试字段
+## 15. 建议重点查看的调试字段
 
 - `debug_summary.final_stage`
   - 看最终停在哪一轮
+- `debug_summary.live_hits_count`
+  - 看补搜总共拿回多少 live docs
 - `debug_summary.selected_live_docs_count`
   - 看第二轮实际用了多少 live docs
 - `generation_attempts`
-  - 看每一轮尝试的摘要
-- `retry_gap_report`
-  - 看首轮失败原因
+  - 看每一轮的图表决策和上下文快照
 - `chart_decision_debug`
-  - 看图表决策是否失败、失败在哪
+  - 看最终 LLM 图表决策输出

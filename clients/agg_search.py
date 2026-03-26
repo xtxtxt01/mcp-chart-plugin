@@ -33,6 +33,7 @@ def _compact(value: Any) -> str:
 class AggSearchClient:
     def __init__(self, config: DemoConfig | None = None):
         self.config = config or DemoConfig()
+        self._last_sid_ms = 0
 
     def _build_cfg(self) -> AggSearchConfig:
         return AggSearchConfig(
@@ -110,15 +111,23 @@ class AggSearchClient:
                 "error": _compact(exc),
             }
 
+    def _next_timestamp_sid(self) -> str:
+        current_ms = time.time_ns() // 1_000_000
+        while current_ms <= self._last_sid_ms:
+            time.sleep(0.001)
+            current_ms = time.time_ns() // 1_000_000
+        self._last_sid_ms = current_ms
+        return str(current_ms)
+
     def search(self, query: str, sid: str | None = None) -> dict[str, Any]:
-        actual_sid = sid or f"chart-search-{time.time_ns()}"
+        actual_sid = sid or self._next_timestamp_sid()
         return self._search_once(query, sid=actual_sid)
 
     def search_many(self, queries: list[str], request_id: str) -> list[dict[str, Any]]:
-        sid_prefix = _compact(request_id) or "chart-search"
+        del request_id
         results: list[dict[str, Any]] = []
         for idx, query in enumerate(queries, start=1):
-            result = self.search(query, sid=f"{sid_prefix}-{idx}-{time.time_ns()}")
+            result = self.search(query)
             result["query_index"] = idx
             result["query"] = query
             results.append(result)

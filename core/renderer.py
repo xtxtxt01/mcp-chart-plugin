@@ -305,6 +305,14 @@ def _build_svg_snapshot_html(svg_markup: str) -> str:
     )
 
 
+def _build_svg_preview_snippet(svg_markup: str) -> str:
+    return (
+        "<div style='width:100%;overflow:auto;background:#f6f8fb;border:1px solid #d9e2f2;border-radius:24px;padding:0;'>"
+        + svg_markup
+        + "</div>"
+    )
+
+
 def _clear_chart_artifacts(target_dir: Path) -> None:
     for name in ["chart_01.png", "chart_01.svg", "_echarts_render.html", "_svg_render.html"]:
         try:
@@ -344,7 +352,7 @@ def _screenshot_html_to_png(target_dir: Path, html_file_name: str, html_content:
             timeout=RENDER_TIMEOUT_S,
             check=False,
         )
-        if completed.returncode == 0 and png_path.exists():
+        if png_path.exists():
             return png_path
         error_text = (completed.stderr or completed.stdout or "").strip()
         raise RuntimeError(
@@ -497,6 +505,10 @@ def _render_bar_line_svg(title: str, chart_data: dict[str, Any]) -> str:
             svg_parts.append(
                 f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_width:.1f}" height="{bar_h:.1f}" rx="8" fill="{color}"/>'
             )
+            svg_parts.append(
+                f'<text x="{cx + cluster_offset:.1f}" y="{max(y - 10, top - 8):.1f}" text-anchor="middle" '
+                f'font-size="16" font-weight="700" fill="{color}" stroke="#ffffff" stroke-width="2" paint-order="stroke">{html.escape(_format_number(value))}</text>'
+            )
 
     for s_idx, item in enumerate(line_series, start=len(bar_series)):
         color = colors[s_idx % len(colors)]
@@ -510,6 +522,11 @@ def _render_bar_line_svg(title: str, chart_data: dict[str, Any]) -> str:
             y = top + plot_h - (plot_h * value / max_value)
             points.append(f"{cx:.1f},{y:.1f}")
             svg_parts.append(f'<circle cx="{cx:.1f}" cy="{y:.1f}" r="6" fill="{color}"/>')
+            label_y = y - 16 if y > top + 32 else y + 28
+            svg_parts.append(
+                f'<text x="{cx:.1f}" y="{label_y:.1f}" text-anchor="middle" '
+                f'font-size="16" font-weight="700" fill="{color}" stroke="#ffffff" stroke-width="2" paint-order="stroke">{html.escape(_format_number(value))}</text>'
+            )
         if points:
             svg_parts.append(
                 f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>'
@@ -549,6 +566,8 @@ def _render_pie_svg(title: str, chart_data: dict[str, Any]) -> str:
     parts = _svg_frame(title)
     parts.append(_render_multiline_text(cx, cy - 14, ["总量", _format_number(total)], font_size=24, weight="700"))
 
+    parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{inner_radius - 10:.1f}" fill="#ffffff"/>')
+    parts.append(_render_multiline_text(cx, cy - 14, ["总量", _format_number(total)], font_size=24, weight="700"))
     start_angle = -math.pi / 2
     legend_x = 670.0
     legend_y = 165.0
@@ -565,6 +584,7 @@ def _render_pie_svg(title: str, chart_data: dict[str, Any]) -> str:
             label_radius = (outer_radius + inner_radius) / 2
             lx, ly = _polar_to_cartesian(cx, cy, label_radius, label_angle)
             lines = _wrap_text(item["name"], max_line_chars=8, max_lines=2)
+            lines.append(_format_number(item["value"]))
             pct = item["value"] / total * 100
             lines.append(f"{pct:.1f}%")
             style = _label_style_for_fill(color)
@@ -658,6 +678,25 @@ def _render_radar_svg(title: str, chart_data: dict[str, Any]) -> str:
             px, py = _polar_to_cartesian(cx, cy, radius * ratio, angle)
             normalized_points.append(f"{px:.1f},{py:.1f}")
             parts.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="5" fill="{color}" stroke="#ffffff" stroke-width="2"/>')
+            value_label_x, value_label_y = _polar_to_cartesian(cx, cy, radius * ratio + 18 + idx * 14, angle)
+            anchor = "middle"
+            if value_label_x < cx - 20:
+                anchor = "end"
+            elif value_label_x > cx + 20:
+                anchor = "start"
+            parts.append(
+                _render_multiline_text(
+                    value_label_x,
+                    value_label_y,
+                    [_format_number(value)],
+                    font_size=14,
+                    fill=color,
+                    stroke="#ffffff",
+                    anchor=anchor,
+                    weight="700",
+                    line_height=16,
+                )
+            )
         parts.append(f'<polygon points="{" ".join(normalized_points)}" fill="{color}" fill-opacity="0.16" stroke="{color}" stroke-width="3"/>')
         ly = legend_y + idx * 42
         parts.append(f'<rect x="{legend_x:.1f}" y="{ly - 12:.1f}" width="24" height="24" rx="6" fill="{color}"/>')
@@ -887,7 +926,10 @@ def _render_sunburst_svg(title: str, chart_data: dict[str, Any]) -> str:
         color = _treemap_color(0, idx)
         ly = legend_y + idx * 46
         parts.append(f'<rect x="{legend_x:.1f}" y="{ly - 14:.1f}" width="24" height="24" rx="6" fill="{color}"/>')
-        parts.append(f'<text x="{legend_x + 36:.1f}" y="{ly + 5:.1f}" font-size="19" font-weight="600" fill="#334155">{html.escape(str(node.get("name") or ""))}</text>')
+        parts.append(f'<text x="{legend_x + 36:.1f}" y="{ly + 1:.1f}" font-size="19" font-weight="600" fill="#334155">{html.escape(str(node.get("name") or ""))}</text>')
+        value = _safe_float(node.get("value"))
+        if value is not None:
+            parts.append(f'<text x="{legend_x + 300:.1f}" y="{ly + 1:.1f}" font-size="18" font-weight="600" fill="#475569" text-anchor="end">{_format_number(value)}</text>')
     return _finish_svg(parts)
 
 
@@ -970,6 +1012,7 @@ def _render_sankey_svg(title: str, chart_data: dict[str, Any]) -> str:
 
     out_offsets = {name: 0.0 for name in nodes}
     in_offsets = {name: 0.0 for name in nodes}
+    link_midpoints: list[tuple[float, float, str]] = []
     parts = _svg_frame(title)
     for link in normalized_links:
         source_pos = positions[link["source"]]
@@ -992,6 +1035,7 @@ def _render_sankey_svg(title: str, chart_data: dict[str, Any]) -> str:
             f"C {c1:.1f} {ty1:.1f} {c0:.1f} {sy1:.1f} {x0:.1f} {sy1:.1f} Z"
         )
         parts.append(f'<path d="{path}" fill="{source_pos["color"]}" fill-opacity="0.30" stroke="none"/>')
+        link_midpoints.append((x0 + (x1 - x0) * 0.5, ((sy0 + sy1) / 2 + (ty0 + ty1) / 2) / 2, _format_number(link["value"])))
 
     for name, pos in positions.items():
         color = pos["color"]
@@ -1007,13 +1051,18 @@ def _render_sankey_svg(title: str, chart_data: dict[str, Any]) -> str:
             _render_multiline_text(
                 text_x,
                 pos["y"] + pos["height"] / 2,
-                _wrap_text(name, max_line_chars=10, max_lines=2),
+                _wrap_text(name, max_line_chars=10, max_lines=2) + [_format_number(value_map.get(name))],
                 font_size=16,
                 fill="#334155",
                 anchor=anchor,
                 weight="600",
                 line_height=20,
             )
+        )
+    for label_x, label_y, label_text in link_midpoints:
+        parts.append(
+            f'<text x="{label_x:.1f}" y="{label_y:.1f}" text-anchor="middle" font-size="14" font-weight="700" '
+            f'fill="#475569" stroke="#ffffff" stroke-width="3" paint-order="stroke">{html.escape(label_text)}</text>'
         )
     return _finish_svg(parts)
 
@@ -1061,6 +1110,39 @@ def _build_chart_svg(title: str, spec: dict[str, Any]) -> str:
     return _render_generic_svg(title, chart_tag, explain, chart_data)
 
 
+def build_no_chart_result(spec: dict[str, Any], request_id: str, title: str) -> dict[str, Any]:
+    target_dir = CHART_ARTIFACTS_ROOT / request_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    _clear_chart_artifacts(target_dir)
+    raw_xml = chart_spec_to_xml(spec)
+    svg_markup = _render_empty_svg(title, str(spec.get("explain") or spec.get("_decision_error") or "No chart will be inserted."))
+    payload = _render_utils.write_result_bundle(
+        OUTPUTS_ROOT,
+        "mcp_demo_chart",
+        request_id,
+        raw_xml,
+        extra={
+            "subtitle": title,
+            "preview_html": _build_svg_preview_snippet(svg_markup),
+        },
+    )
+    txt_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.txt"
+    json_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.json"
+    html_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.html"
+    return {
+        "success": True,
+        "raw_xml": raw_xml,
+        "payload": payload,
+        "relative_path": "",
+        "png_path": "",
+        "image_path": "",
+        "txt_path": relative_to_demo(txt_path),
+        "json_path": relative_to_demo(json_path),
+        "html_path": relative_to_demo(html_path),
+        "markdown": "",
+    }
+
+
 def render_chart_artifacts(spec: dict[str, Any], request_id: str, title: str) -> dict[str, Any]:
     target_dir = CHART_ARTIFACTS_ROOT / request_id
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -1068,17 +1150,26 @@ def render_chart_artifacts(spec: dict[str, Any], request_id: str, title: str) ->
     raw_xml = chart_spec_to_xml(spec)
     parsed = _render_utils.parse_output(raw_xml)
     option = _render_utils.build_echarts_option(parsed)
+
+    extra = {"subtitle": title}
+    if option is None:
+        svg_markup = _build_chart_svg(title, spec)
+        extra["preview_html"] = _build_svg_preview_snippet(svg_markup)
+
     payload = _render_utils.write_result_bundle(
         OUTPUTS_ROOT,
         "mcp_demo_chart",
         request_id,
         raw_xml,
-        extra={"subtitle": title},
+        extra=extra,
     )
-    if option:
+
+    if option is not None:
         chart_path = _render_echarts_png(request_id=request_id, option=option)
     else:
-        chart_path = _render_svg_markup_png(request_id=request_id, svg_markup=_build_chart_svg(title, spec))
+        svg_markup = _build_chart_svg(title, spec)
+        chart_path = _render_svg_markup_png(request_id=request_id, svg_markup=svg_markup)
+
     txt_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.txt"
     json_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.json"
     html_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.html"

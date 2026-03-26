@@ -1,5 +1,12 @@
 __pycache__/
+.pycache_tmp/
+.pycache_verify/
 *.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 artifacts/
 outputs/
+data/
 .env

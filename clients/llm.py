@@ -24,12 +24,10 @@ class SecureLLMClient:
         self,
         config: DemoConfig | None = None,
         *,
-        stage: str | None = None,
         profile: LLMProfile | None = None,
     ):
         self.config = config or DemoConfig()
-        self.stage = stage or "default"
-        self.profile = profile or self.config.llm_profile(self.stage)
+        self.profile = profile or self.config.llm_profile()
 
     def available(self) -> tuple[bool, str]:
         if not self.profile.base_url:

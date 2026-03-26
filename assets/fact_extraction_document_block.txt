@@ -1,3 +1,0 @@
-【文档索引 {{doc_index}}】
-标题: {{title}}
-内容: {{content}}

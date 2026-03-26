@@ -5,8 +5,8 @@ import re
 from typing import Any
 
 from ..clients.llm import SecureLLMClient
-from ..config import BASELINE_PROMPT_PATH, CHART_DECISION_USER_PROMPT_PATH, DemoConfig
-from ..prompt_utils import load_text_multi, render_prompt_template
+from ..config import BASELINE_PROMPT_PATH, DemoConfig
+from ..prompt_utils import load_text_multi
 
 
 SUPPORTED_CHART_TAGS = [
@@ -116,13 +116,16 @@ def _build_llm_decision_user_prompt(task: dict[str, Any], docs: list[dict[str, A
     description = _compact(task.get("chart_description") or task.get("chart_title"))
     context = _compact(task.get("write_requirement"))
     references = _reference_payload(docs)
-    return render_prompt_template(
-        CHART_DECISION_USER_PROMPT_PATH,
-        {
-            "description": description,
-            "context": context,
-            "references_json": json.dumps(references, ensure_ascii=False, indent=2),
-        },
+    return (
+        "## 图表描述<description>\n"
+        f"{description}\n\n"
+        "## 上文内容\n"
+        "```markdown\n"
+        f"{context}\n"
+        "```\n\n"
+        "## 参考资料\n"
+        "(如下资料中id为参考资料序号，content为资料内容)\n"
+        f"{json.dumps(references, ensure_ascii=False, indent=2)}"
     )
 
 
@@ -152,7 +155,7 @@ def decide_chart_spec(
     del retrieval_plan
 
     cfg = config or DemoConfig()
-    llm = SecureLLMClient(cfg, stage="chart_generation")
+    llm = SecureLLMClient(cfg)
     ok, message = llm.available()
     if not ok:
         return _empty_spec(

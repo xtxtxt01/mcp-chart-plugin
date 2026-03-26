@@ -16,19 +16,13 @@ SCHEMAS_ROOT = MCP_DEMO_ROOT / "schemas"
 ASSETS_ROOT = MCP_DEMO_ROOT / "assets"
 VENDOR_ROOT = MCP_DEMO_ROOT / "vendor"
 MD2HTML_PATH = VENDOR_ROOT / "md2html.py"
+ECHARTS_VENDOR_PATH = VENDOR_ROOT / "echarts.min.js"
 
 BASELINE_PROMPT_PATH = ASSETS_ROOT / "baseline_chart_prompt.txt"
-QUERY_PLANNING_SYSTEM_PROMPT_PATH = ASSETS_ROOT / "query_planning_system_prompt.txt"
-QUERY_PLANNING_USER_PROMPT_PATH = ASSETS_ROOT / "query_planning_user_prompt.txt"
-QUERY_PLANNING_GAP_SECTION_PROMPT_PATH = ASSETS_ROOT / "query_planning_gap_section.txt"
-FACT_EXTRACTION_SYSTEM_PROMPT_PATH = ASSETS_ROOT / "fact_extraction_system_prompt.txt"
-FACT_EXTRACTION_USER_PROMPT_PATH = ASSETS_ROOT / "fact_extraction_user_prompt.txt"
-FACT_EXTRACTION_DOCUMENT_BLOCK_PROMPT_PATH = ASSETS_ROOT / "fact_extraction_document_block.txt"
-CHART_DECISION_USER_PROMPT_PATH = ASSETS_ROOT / "chart_decision_user_prompt.txt"
+QUERY_PLANNING_PROMPT_PATH = ASSETS_ROOT / "query_planning_prompt.txt"
 RENDER_UTILS_PATH = VENDOR_ROOT / "render_utils.py"
-
-LOG_HELPER_ROOT = WORKSPACE_ROOT
-SEARCH_AUDIT_ROOT = WORKSPACE_ROOT / "chart_search_recall_audit"
+RENDER_TIMEOUT_S = int(os.getenv("MCP_DEMO_RENDER_TIMEOUT_S", "45"))
+RENDER_VIRTUAL_TIME_BUDGET_MS = int(os.getenv("MCP_DEMO_RENDER_VIRTUAL_TIME_BUDGET_MS", "12000"))
 
 for path in [ARTIFACTS_ROOT, CHART_ARTIFACTS_ROOT, OUTPUTS_ROOT, SCHEMAS_ROOT, ASSETS_ROOT, VENDOR_ROOT]:
     path.mkdir(parents=True, exist_ok=True)
@@ -82,9 +76,7 @@ class DemoConfig:
     agg_timeout_ms: int = int(os.getenv("MCP_DEMO_AGG_TIMEOUT_MS", "15000"))
     agg_top_k: int = int(os.getenv("MCP_DEMO_AGG_TOP_K", "10"))
     chart_max_queries: int = int(os.getenv("MCP_DEMO_MAX_QUERIES", "8"))
-    chart_max_docs_for_extraction: int = int(os.getenv("MCP_DEMO_MAX_DOCS", "10"))
-    chart_existing_refs_quota: int = int(os.getenv("MCP_DEMO_EXISTING_REFS_QUOTA", "4"))
-    chart_live_docs_quota: int = int(os.getenv("MCP_DEMO_LIVE_DOCS_QUOTA", "10"))
+    chart_live_docs_quota: int = int(os.getenv("MCP_DEMO_LIVE_DOCS_QUOTA", "3"))
 
     llm_base_url: str = os.getenv(
         "MCP_DEMO_LLM_BASE_URL",
@@ -96,57 +88,7 @@ class DemoConfig:
     require_https_for_model: bool = _env_bool("MCP_DEMO_REQUIRE_HTTPS", True)
     force_function_call: bool = _env_bool("MCP_DEMO_FORCE_FUNCTION_CALL", True)
 
-    planning_llm_base_url: str = os.getenv("MCP_DEMO_LLM_PLANNING_BASE_URL", "")
-    planning_llm_api_key: str = os.getenv("MCP_DEMO_LLM_PLANNING_API_KEY", "")
-    planning_llm_model: str = os.getenv("MCP_DEMO_LLM_PLANNING_MODEL", "")
-    planning_llm_timeout_s: int = int(os.getenv("MCP_DEMO_LLM_PLANNING_TIMEOUT_S", os.getenv("MCP_DEMO_LLM_TIMEOUT_S", "90")))
-    planning_llm_require_https_for_model: bool = _env_bool(
-        "MCP_DEMO_LLM_PLANNING_REQUIRE_HTTPS",
-        _env_bool("MCP_DEMO_REQUIRE_HTTPS", True),
-    )
-    planning_llm_force_function_call: bool = _env_bool(
-        "MCP_DEMO_LLM_PLANNING_FORCE_FUNCTION_CALL",
-        _env_bool("MCP_DEMO_FORCE_FUNCTION_CALL", True),
-    )
-
-    extraction_llm_base_url: str = os.getenv("MCP_DEMO_LLM_EXTRACTION_BASE_URL", "")
-    extraction_llm_api_key: str = os.getenv("MCP_DEMO_LLM_EXTRACTION_API_KEY", "")
-    extraction_llm_model: str = os.getenv("MCP_DEMO_LLM_EXTRACTION_MODEL", "")
-    extraction_llm_timeout_s: int = int(os.getenv("MCP_DEMO_LLM_EXTRACTION_TIMEOUT_S", os.getenv("MCP_DEMO_LLM_TIMEOUT_S", "90")))
-    extraction_llm_require_https_for_model: bool = _env_bool(
-        "MCP_DEMO_LLM_EXTRACTION_REQUIRE_HTTPS",
-        _env_bool("MCP_DEMO_REQUIRE_HTTPS", True),
-    )
-    extraction_llm_force_function_call: bool = _env_bool(
-        "MCP_DEMO_LLM_EXTRACTION_FORCE_FUNCTION_CALL",
-        _env_bool("MCP_DEMO_FORCE_FUNCTION_CALL", True),
-    )
-
-    chart_generation_llm_base_url: str = os.getenv("MCP_DEMO_LLM_CHART_BASE_URL", "")
-    chart_generation_llm_api_key: str = os.getenv("MCP_DEMO_LLM_CHART_API_KEY", "")
-    chart_generation_llm_model: str = os.getenv("MCP_DEMO_LLM_CHART_MODEL", "")
-    chart_generation_llm_timeout_s: int = int(os.getenv("MCP_DEMO_LLM_CHART_TIMEOUT_S", os.getenv("MCP_DEMO_LLM_TIMEOUT_S", "90")))
-    chart_generation_llm_require_https_for_model: bool = _env_bool(
-        "MCP_DEMO_LLM_CHART_REQUIRE_HTTPS",
-        _env_bool("MCP_DEMO_REQUIRE_HTTPS", True),
-    )
-    chart_generation_llm_force_function_call: bool = _env_bool(
-        "MCP_DEMO_LLM_CHART_FORCE_FUNCTION_CALL",
-        _env_bool("MCP_DEMO_FORCE_FUNCTION_CALL", True),
-    )
-
-    def llm_profile(self, stage: str | None = None) -> LLMProfile:
-        stage_key = (stage or "default").strip().lower()
-        if stage_key in {"planning", "extraction", "chart_generation", "chart"}:
-            prefix = "chart_generation" if stage_key in {"chart_generation", "chart"} else stage_key
-            return LLMProfile(
-                base_url=str(getattr(self, f"{prefix}_llm_base_url") or self.llm_base_url),
-                api_key=str(getattr(self, f"{prefix}_llm_api_key") or self.llm_api_key),
-                model=str(getattr(self, f"{prefix}_llm_model") or self.llm_model),
-                timeout_s=int(getattr(self, f"{prefix}_llm_timeout_s")),
-                require_https_for_model=bool(getattr(self, f"{prefix}_llm_require_https_for_model")),
-                force_function_call=bool(getattr(self, f"{prefix}_llm_force_function_call")),
-            )
+    def llm_profile(self) -> LLMProfile:
         return LLMProfile(
             base_url=self.llm_base_url,
             api_key=self.llm_api_key,
@@ -165,28 +107,23 @@ class DemoConfig:
                 setattr(self, key, value)
 
     def _apply_llm_overrides(self, llm_config: dict[str, Any]) -> None:
-        stage_map = {
-            "default": "default",
-            "planning": "planning",
-            "extraction": "extraction",
-            "chart_generation": "chart_generation",
-            "chart": "chart_generation",
-        }
-        for input_stage, internal_stage in stage_map.items():
-            value = llm_config.get(input_stage)
-            if isinstance(value, dict):
-                self._apply_llm_stage(internal_stage, value)
+        values = llm_config
+        if isinstance(llm_config.get("default"), dict):
+            values = llm_config["default"]
+        elif any(isinstance(llm_config.get(key), dict) for key in ("planning", "chart_generation", "chart")):
+            for key in ("planning", "chart_generation", "chart"):
+                if isinstance(llm_config.get(key), dict):
+                    values = llm_config[key]
+                    break
 
-    def _apply_llm_stage(self, stage: str, values: dict[str, Any]) -> None:
-        prefix = "llm" if stage == "default" else f"{stage}_llm"
         key_map = {
-            "base_url": f"{prefix}_base_url",
-            "api_key": f"{prefix}_api_key",
-            "model": f"{prefix}_model",
-            "timeout_s": f"{prefix}_timeout_s",
-            "require_https": f"{prefix}_require_https_for_model",
-            "require_https_for_model": f"{prefix}_require_https_for_model",
-            "force_function_call": f"{prefix}_force_function_call",
+            "base_url": "llm_base_url",
+            "api_key": "llm_api_key",
+            "model": "llm_model",
+            "timeout_s": "llm_timeout_s",
+            "require_https": "require_https_for_model",
+            "require_https_for_model": "require_https_for_model",
+            "force_function_call": "force_function_call",
         }
         for input_key, attr_name in key_map.items():
             if input_key not in values or not hasattr(self, attr_name):

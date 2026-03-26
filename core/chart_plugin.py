@@ -7,17 +7,12 @@ from ..clients.agg_search import AggSearchClient
 from ..clients.llm import SecureLLMClient, ToolCallResult
 from ..config import (
     DemoConfig,
-    FACT_EXTRACTION_DOCUMENT_BLOCK_PROMPT_PATH,
-    FACT_EXTRACTION_SYSTEM_PROMPT_PATH,
-    FACT_EXTRACTION_USER_PROMPT_PATH,
-    QUERY_PLANNING_GAP_SECTION_PROMPT_PATH,
-    QUERY_PLANNING_SYSTEM_PROMPT_PATH,
-    QUERY_PLANNING_USER_PROMPT_PATH,
+    QUERY_PLANNING_PROMPT_PATH,
 )
-from ..prompt_utils import load_text_multi, render_prompt_template
+from ..prompt_utils import load_text_multi
 from ..core.baseline_decider import decide_chart_spec
 from ..core.renderer import render_chart_artifacts
-from ..schemas.function_schemas import extract_chart_facts_tools, plan_chart_retrieval_tools
+from ..schemas.function_schemas import plan_chart_retrieval_tools
 
 
 def _compact(value: Any) -> str:
@@ -154,6 +149,28 @@ def _knowledge_docs(
     return docs
 
 
+def _compose_generation_docs(
+    existing_knowledges: list[dict[str, Any]],
+    live_docs: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    docs = _knowledge_docs(existing_knowledges)
+    prompt_id = len(docs)
+    for raw_doc in live_docs or []:
+        doc = dict(raw_doc)
+        doc["prompt_id"] = prompt_id
+        doc["source_kind"] = "live_search"
+        doc["source_index"] = _safe_int(doc.get("source_index")) if _safe_int(doc.get("source_index")) is not None else prompt_id
+        doc["title"] = _compact(doc.get("title")) or f"live_search_doc_{prompt_id}"
+        doc["summary"] = _compact(doc.get("summary") or doc.get("content") or doc.get("title"))[:400]
+        doc["content"] = _compact(doc.get("content") or doc.get("summary") or doc.get("title"))
+        doc["url"] = _compact(doc.get("url"))
+        doc["query"] = _compact(doc.get("query"))
+        doc["query_index"] = _safe_int(doc.get("query_index")) if _safe_int(doc.get("query_index")) is not None else -1
+        docs.append(doc)
+        prompt_id += 1
+    return docs
+
+
 def _knowledge_preview(knowledges: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
     preview: list[dict[str, Any]] = []
     for idx, item in enumerate(knowledges[:limit]):
@@ -192,23 +209,29 @@ def _build_query_planning_prompt(task: dict[str, Any], gap_report: dict[str, Any
 
     gap_section = ""
     if gap_report:
-        gap_section = render_prompt_template(
-            QUERY_PLANNING_GAP_SECTION_PROMPT_PATH,
-            {
-                "gap_report_json": json.dumps(gap_report, ensure_ascii=False, indent=2),
-            },
+        gap_section = (
+            "\n## 第一次成图失败情况\n"
+            f"{json.dumps(gap_report, ensure_ascii=False, indent=2)}\n\n"
+            "## 额外要求\n"
+            "- 你需要结合第一次失败原因，判断还缺哪些关键数据字段。\n"
+            "- 本轮 queries 应优先补齐缺口，不要重复搜索已经充分存在的信息。\n"
+            "- notes 里请明确写出：第一次为什么没能成图、本轮重点要补什么。\n"
         )
 
-    return render_prompt_template(
-        QUERY_PLANNING_USER_PROMPT_PATH,
-        {
-            "chart_title": _compact(task.get("chart_title")),
-            "chart_description": _compact(task.get("chart_description")),
-            "write_requirement": _compact(task.get("write_requirement")),
-            "base_queries_json": json.dumps(task.get("base_queries") or [], ensure_ascii=False, indent=2),
-            "ref_preview_json": json.dumps(ref_preview, ensure_ascii=False, indent=2),
-            "gap_section": gap_section,
-        },
+    return (
+        "## 图表任务\n"
+        f"- 图表标题：{_compact(task.get('chart_title'))}\n"
+        f"- 图表描述：{_compact(task.get('chart_description'))}\n"
+        f"- 写作要求：{_compact(task.get('write_requirement'))}\n\n"
+        "## 已有基础 queries\n"
+        f"{json.dumps(task.get('base_queries') or [], ensure_ascii=False, indent=2)}\n\n"
+        "## 已有上游 insights 预览\n"
+        f"{json.dumps(ref_preview, ensure_ascii=False, indent=2)}\n"
+        f"{gap_section}\n"
+        "## 输出要求\n"
+        "- comparison_mode 仅从 compare/trend/share/flow/hierarchy/funnel/multidim/other 中选择。\n"
+        "- queries 返回 3 到 8 条，且语言与任务一致。\n"
+        "- intent 中的 entities、metrics、dimensions 只写你能从任务中明确识别到的内容。\n"
     )
 
 
@@ -254,11 +277,11 @@ def plan_chart_retrieval(
     config: DemoConfig,
     gap_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    llm = SecureLLMClient(config, stage="planning")
+    llm = SecureLLMClient(config)
     result: ToolCallResult | None = None
     if llm.available()[0]:
         result = llm.call_with_tools(
-            system_prompt=load_text_multi(QUERY_PLANNING_SYSTEM_PROMPT_PATH),
+            system_prompt=load_text_multi(QUERY_PLANNING_PROMPT_PATH),
             user_prompt=_build_query_planning_prompt(task, gap_report=gap_report),
             tools=plan_chart_retrieval_tools(),
             tool_name="plan_chart_retrieval",
@@ -272,21 +295,6 @@ def expand_queries(task: dict[str, Any], retrieval_plan: dict[str, Any], config:
     if not queries:
         queries = _fallback_queries(task, config)
     return _ordered_unique(queries)[: config.chart_max_queries]
-
-
-def _existing_ref_doc(ref: dict[str, Any], fallback_index: int) -> dict[str, Any]:
-    source_index = _safe_int(ref.get("id"))
-    content = _compact(ref.get("content"))
-    return {
-        "source_kind": "existing_ref",
-        "source_index": source_index if source_index is not None else fallback_index,
-        "title": f"existing_ref_{source_index if source_index is not None else fallback_index}",
-        "summary": content[:240],
-        "content": content,
-        "url": "",
-        "query": "",
-        "query_index": -1,
-    }
 
 
 def _live_doc(doc: dict[str, Any], *, query: str, query_index: int) -> dict[str, Any]:
@@ -308,9 +316,6 @@ def _live_doc(doc: dict[str, Any], *, query: str, query_index: int) -> dict[str,
 
 def search_documents(task: dict[str, Any], queries: list[str], config: DemoConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     documents: list[dict[str, Any]] = []
-    for idx, ref in enumerate(task.get("existing_refs") or []):
-        documents.append(_existing_ref_doc(ref, idx))
-
     client = AggSearchClient(config)
     results = client.search_many(queries, request_id=_compact(task.get("request_id")))
 
@@ -347,104 +352,28 @@ def _doc_identity(doc: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
-def prepare_docs_for_extraction(
+def prepare_live_docs_for_generation(
     documents: list[dict[str, Any]],
-    retrieval_plan: dict[str, Any],
-    task: dict[str, Any],
     config: DemoConfig,
 ) -> list[dict[str, Any]]:
-    del retrieval_plan
-    del task
-
     if not documents:
+        return []
+
+    live_doc_limit = max(0, min(config.chart_live_docs_quota, 3))
+    if live_doc_limit == 0:
         return []
 
     selected: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-    for doc in documents[: config.chart_live_docs_quota]:
+    for doc in documents:
         identity = _doc_identity(doc)
         if identity in seen:
             continue
         seen.add(identity)
         selected.append(dict(doc))
-
-    for idx, doc in enumerate(selected):
-        doc["prompt_id"] = idx
+        if len(selected) >= live_doc_limit:
+            break
     return selected
-
-
-def _doc_payload_for_extraction(doc: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "doc_index": _safe_int(doc.get("prompt_id")),
-        "title": _compact(doc.get("title")),
-        "content": _compact(doc.get("content"))[:1800],
-    }
-
-
-def _build_fact_extraction_prompt(task: dict[str, Any], retrieval_plan: dict[str, Any], docs: list[dict[str, Any]]) -> str:
-    del retrieval_plan
-
-    doc_blocks: list[str] = []
-    for item in docs:
-        payload = _doc_payload_for_extraction(item)
-        doc_blocks.append(
-            render_prompt_template(
-                FACT_EXTRACTION_DOCUMENT_BLOCK_PROMPT_PATH,
-                {
-                    "doc_index": payload["doc_index"],
-                    "title": payload["title"],
-                    "content": payload["content"],
-                },
-            )
-        )
-
-    chart_title = _compact(task.get("chart_title"))
-    chart_requirement_parts = [
-        _compact(task.get("chart_description")),
-        _compact(task.get("write_requirement")),
-    ]
-    chart_requirement = "\n".join([part for part in chart_requirement_parts if part])
-
-    return render_prompt_template(
-        FACT_EXTRACTION_USER_PROMPT_PATH,
-        {
-            "doc_blocks": "\n\n".join(doc_blocks),
-            "chart_title": chart_title,
-            "chart_requirement": chart_requirement,
-        },
-    )
-
-
-def extract_facts(
-    task: dict[str, Any],
-    docs: list[dict[str, Any]],
-    retrieval_plan: dict[str, Any],
-    config: DemoConfig,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    llm = SecureLLMClient(config, stage="extraction")
-    tool_result: ToolCallResult | None = None
-    llm_knowledges: list[dict[str, Any]] = []
-    if docs and llm.available()[0]:
-        tool_result = llm.call_with_tools(
-            system_prompt=load_text_multi(FACT_EXTRACTION_SYSTEM_PROMPT_PATH),
-            user_prompt=_build_fact_extraction_prompt(task, retrieval_plan, docs),
-            tools=extract_chart_facts_tools(),
-            tool_name="extract_chart_facts",
-            temperature=0.0,
-        )
-        if tool_result.ok and isinstance(tool_result.arguments, dict):
-            llm_knowledges = [item for item in (tool_result.arguments.get("knowledges") or []) if isinstance(item, dict)]
-
-    merged = merge_and_dedupe_knowledges(llm_knowledges)
-    debug = {
-        "llm_only_mode": True,
-        "llm_knowledge_count": len(llm_knowledges),
-        "merged_knowledge_count": len(merged),
-        "llm_error": _compact(tool_result.error if tool_result else ""),
-        "llm_ok": bool(tool_result.ok) if tool_result else False,
-        "llm_raw_output": _compact(tool_result.content if tool_result else ""),
-    }
-    return merged, debug
 
 
 def _brief_reference(doc: dict[str, Any]) -> dict[str, Any]:
@@ -493,10 +422,9 @@ def _attempt_snapshot(
     stage: str,
     retrieval_plan: dict[str, Any],
     queries: list[str],
-    docs_for_extraction: list[dict[str, Any]],
+    selected_live_docs: list[dict[str, Any]],
     docs_for_generation: list[dict[str, Any]],
     knowledges: list[dict[str, Any]],
-    extraction_debug: dict[str, Any],
     spec: dict[str, Any],
     used_agg_search: bool,
     live_hits_count: int,
@@ -507,12 +435,11 @@ def _attempt_snapshot(
         "planning_mode": _compact(retrieval_plan.get("_planning_mode")),
         "query_count": len(queries),
         "live_hits_count": live_hits_count,
-        "docs_for_extraction_count": len(docs_for_extraction),
+        "selected_live_docs_count": len(selected_live_docs),
         "docs_for_generation_count": len(docs_for_generation),
         "knowledge_count": len(knowledges),
         "chart_tag": _compact(spec.get("chart_tag") or "empty"),
         "decision_mode": _compact(spec.get("_decision_mode") or "unknown"),
-        "extraction_debug": extraction_debug,
     }
 
 
@@ -528,19 +455,8 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
     initial_queries: list[str] = []
     initial_search_results: list[dict[str, Any]] = []
     initial_live_search_overview: list[dict[str, Any]] = []
-    initial_docs_for_extraction: list[dict[str, Any]] = []
-    initial_docs_for_generation = _knowledge_docs(existing_knowledges)
-    initial_extraction_debug = {
-        "llm_only_mode": True,
-        "llm_skipped": True,
-        "passthrough_existing_knowledges": True,
-        "existing_knowledge_count": len(existing_knowledges),
-        "llm_knowledge_count": 0,
-        "merged_knowledge_count": len(existing_knowledges),
-        "llm_error": "",
-        "llm_ok": False,
-        "llm_raw_output": "",
-    }
+    initial_selected_live_docs: list[dict[str, Any]] = []
+    initial_docs_for_generation = _compose_generation_docs(existing_knowledges)
     initial_spec = decide_chart_spec(
         task,
         existing_knowledges,
@@ -553,10 +469,9 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
             stage="existing_insights_only",
             retrieval_plan=initial_retrieval_plan,
             queries=initial_queries,
-            docs_for_extraction=initial_docs_for_extraction,
+            selected_live_docs=initial_selected_live_docs,
             docs_for_generation=initial_docs_for_generation,
             knowledges=existing_knowledges,
-            extraction_debug=initial_extraction_debug,
             spec=initial_spec,
             used_agg_search=False,
             live_hits_count=0,
@@ -567,12 +482,10 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
         gap_report = _build_gap_report(task, initial_spec, existing_knowledges)
         retrieval_plan = plan_chart_retrieval(task, config, gap_report=gap_report)
         queries = expand_queries(task, retrieval_plan, config)
-        documents, search_results, live_search_overview = search_documents(task, queries, config)
-        live_documents = [doc for doc in documents if doc.get("source_kind") == "live_search"]
-        docs_for_extraction = prepare_docs_for_extraction(live_documents, retrieval_plan, task, config)
-        new_knowledges, extraction_debug = extract_facts(task, docs_for_extraction, retrieval_plan, config)
-        knowledges = merge_and_dedupe_knowledges(existing_knowledges + new_knowledges)
-        docs_for_generation = _knowledge_docs(existing_knowledges, new_knowledges)
+        live_documents, search_results, live_search_overview = search_documents(task, queries, config)
+        selected_live_docs = prepare_live_docs_for_generation(live_documents, config)
+        knowledges = existing_knowledges
+        docs_for_generation = _compose_generation_docs(existing_knowledges, selected_live_docs)
         spec = decide_chart_spec(
             task,
             knowledges,
@@ -583,13 +496,12 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
         live_hits_count = sum(len(result.get("documents") or []) for result in search_results)
         generation_attempts.append(
             _attempt_snapshot(
-                stage="existing_insights_plus_live_insights",
+                stage="existing_insights_plus_top_live_docs",
                 retrieval_plan=retrieval_plan,
                 queries=queries,
-                docs_for_extraction=docs_for_extraction,
+                selected_live_docs=selected_live_docs,
                 docs_for_generation=docs_for_generation,
                 knowledges=knowledges,
-                extraction_debug=extraction_debug,
                 spec=spec,
                 used_agg_search=True,
                 live_hits_count=live_hits_count,
@@ -600,10 +512,9 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
         queries = initial_queries
         search_results = initial_search_results
         live_search_overview = initial_live_search_overview
-        docs_for_extraction = initial_docs_for_extraction
+        selected_live_docs = initial_selected_live_docs
         docs_for_generation = initial_docs_for_generation
         knowledges = existing_knowledges
-        extraction_debug = initial_extraction_debug
         spec = initial_spec
         live_hits_count = 0
 
@@ -613,24 +524,23 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
     decision_mode = _compact(spec.get("_decision_mode") or "unknown")
     decision_error = _compact(spec.get("_decision_error"))
     decision_raw_output = _compact(spec.get("_decision_raw_output") or spec.get("_raw_output"))
-    extraction_refs = [_brief_reference(doc) for doc in docs_for_extraction]
+    selected_live_doc_refs = [_brief_reference(doc) for doc in selected_live_docs]
     generation_refs = [_brief_reference(doc) for doc in docs_for_generation]
 
     return {
         "success": True,
         "markdown": render_result["markdown"],
-        "relative_path": render_result["svg_path"],
+        "relative_path": render_result["relative_path"],
         "chart_tag": _compact(spec.get("chart_tag") or "empty"),
         "retrieval_plan": retrieval_plan,
         "queries": queries,
         "search_results": search_results,
         "live_search_overview": live_search_overview,
-        "docs_for_extraction": extraction_refs,
+        "selected_live_docs": selected_live_doc_refs,
         "docs_for_generation": generation_refs,
         "knowledges": knowledges,
         "facts": knowledges,
         "references": generation_refs,
-        "extraction_debug": extraction_debug,
         "chart_decision_debug": {
             "decision_mode": decision_mode,
             "decision_error": decision_error,
@@ -642,12 +552,12 @@ def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[st
             "query_count": len(queries),
             "existing_refs_count": len(task.get("existing_refs") or []),
             "live_hits_count": live_hits_count,
-            "docs_for_extraction_count": len(docs_for_extraction),
+            "selected_live_docs_count": len(selected_live_docs),
             "docs_for_generation_count": len(docs_for_generation),
             "knowledge_count": len(knowledges),
             "chart_tag": _compact(spec.get("chart_tag") or "empty"),
             "decision_mode": decision_mode,
-            "used_agg_search": bool(live_hits_count),
+            "used_agg_search": len(generation_attempts) > 1,
             "attempt_count": len(generation_attempts),
             "final_stage": _compact(generation_attempts[-1].get("stage")) if generation_attempts else "",
         },
@@ -659,8 +569,7 @@ __all__ = [
     "plan_chart_retrieval",
     "expand_queries",
     "search_documents",
-    "prepare_docs_for_extraction",
-    "extract_facts",
+    "prepare_live_docs_for_generation",
     "merge_and_dedupe_knowledges",
     "generate_chart_markdown",
 ]

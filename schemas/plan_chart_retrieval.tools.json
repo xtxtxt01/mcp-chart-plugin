@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "plan_chart_retrieval",
-      "description": "分析图表任务，规划补充检索意图，并返回可直接执行的搜索 queries。",
+      "description": "Analyze the chart task and return focused search queries for a single supplementary retrieval round.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -12,7 +12,7 @@
             "properties": {
               "comparison_mode": {
                 "type": "string",
-                "description": "图表任务的主要对比/表达模式。",
+                "description": "Primary comparison or visualization mode implied by the chart task.",
                 "enum": [
                   "compare",
                   "trend",
@@ -26,28 +26,28 @@
               },
               "entities": {
                 "type": "array",
-                "description": "任务中明确出现的核心实体。",
+                "description": "Core entities explicitly mentioned in the task.",
                 "items": {
                   "type": "string"
                 }
               },
               "metrics": {
                 "type": "array",
-                "description": "任务中需要补齐的指标。",
+                "description": "Key metrics or facts still needed to support the chart.",
                 "items": {
                   "type": "string"
                 }
               },
               "dimensions": {
                 "type": "array",
-                "description": "任务中的类别、阶段、年份、区域等维度。",
+                "description": "Useful grouping dimensions such as category, stage, year, or region.",
                 "items": {
                   "type": "string"
                 }
               },
               "chart_type_hints": {
                 "type": "array",
-                "description": "如果任务本身已经明显指向某类图，可给出提示。",
+                "description": "Optional hints if the task naturally points to a chart family.",
                 "items": {
                   "type": "string",
                   "enum": [
@@ -64,28 +64,28 @@
               },
               "must_have_fields": {
                 "type": "array",
-                "description": "成图前必须补齐的字段。",
+                "description": "Fields that must be found before the chart can be supported.",
                 "items": {
                   "type": "string"
                 }
               },
               "time_hints": {
                 "type": "array",
-                "description": "检索中应重点关注的时间提示。",
+                "description": "Time constraints that should influence the queries.",
                 "items": {
                   "type": "string"
                 }
               },
               "region_hints": {
                 "type": "array",
-                "description": "检索中应重点关注的地域提示。",
+                "description": "Region constraints that should influence the queries.",
                 "items": {
                   "type": "string"
                 }
               },
               "query_language": {
                 "type": "string",
-                "description": "建议检索语言，如 zh、en、mixed。"
+                "description": "Recommended query language, such as zh, en, or mixed."
               }
             },
             "required": [
@@ -96,14 +96,14 @@
           },
           "queries": {
             "type": "array",
-            "description": "3 到 8 条聚焦的检索 query。",
+            "description": "Three to eight focused queries for the one supplementary search round.",
             "items": {
               "type": "string"
             }
           },
           "notes": {
             "type": "string",
-            "description": "必要时补充简短规划说明。"
+            "description": "Optional short planning notes."
           }
         },
         "required": [

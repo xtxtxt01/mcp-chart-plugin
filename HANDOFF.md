@@ -1,29 +1,25 @@
 # 图表生成 MCP 交付说明
 
-本次交付内容为一个可独立调用的 **图表生成 MCP**，用于在 review / DeepResearch 阶段根据图表任务描述、已有参考资料和补充检索结果生成最终图表，并返回可直接插入报告的 Markdown 图片引用。
+本次交付内容为一个可独立调用的图表生成 MCP，用于在 review / DeepResearch 阶段根据图表任务描述、已有参考资料和一次补充检索结果生成最终图表，并返回可直接插入报告的 Markdown 图片引用。
 
 ## 1. 仓库地址
-
-GitHub 仓库：
 
 - `https://github.com/xtxtxt01/mcp-chart-plugin.git`
 
 ## 2. MCP 用途
 
-该 MCP 负责图表生成这一项能力，输入为一条图表任务的 `review_payload`，输出为：
+该 MCP 负责图表生成能力，输入为 `review_payload`，输出为：
 
 - 图表 Markdown 引用
 - 图表相对路径
 - 图表类型
 - 调试摘要信息
 
-适合在 DeepResearch / review 阶段被主流程按需调用。
+适合在 DeepResearch / review 阶段由主流程按需调用。
 
 ## 3. 启动方式
 
 该 MCP 采用 `stdio` 方式启动。
-
-启动命令：
 
 ```bash
 python -m MCP_demo
@@ -35,13 +31,13 @@ python -m MCP_demo
 python -m MCP_demo.app.server
 ```
 
-## 4. 正式使用的 Tool
+## 4. 正式 Tool
 
 正式接入时只使用以下 tool：
 
 - `generate_chart_markdown`
 
-## 5. 最小输入格式
+## 5. 输入格式
 
 `generate_chart_markdown` 的输入为：
 
@@ -70,32 +66,14 @@ python -m MCP_demo.app.server
 
 - `request_id`：本次图表请求唯一标识，必填
 - `chart_title`：图表标题，必填
-- `chart_description`：图表的具体绘制目标，必填
-- `write_requirement`：本章/本节写作要求，可选
+- `chart_description`：图表绘制目标，必填
 - `existing_refs`：上游已有参考资料或已抽取结果，必填
-- `base_queries`：基础检索 query，首轮无法成图时用于补充 aggSearch，可选
-
-`existing_refs` 每项至少建议为：
-
-```json
-{
-  "id": 0,
-  "content": "文本内容"
-}
-```
-
-`base_queries` 为字符串数组，例如：
-
-```json
-[
-  "2026 海信 RGB Mini LED 分区数 亮度 色域",
-  "2026 TCL SQD Mini LED 分区数 亮度 色域"
-]
-```
+- `write_requirement`：写作要求，可选
+- `base_queries`：基础检索 query，可选
 
 ## 6. 输出格式
 
-典型输出中的核心字段如下：
+典型输出如下：
 
 ```json
 {
@@ -111,109 +89,73 @@ python -m MCP_demo.app.server
 }
 ```
 
-主要字段说明：
+上游通常重点使用：
 
-- `markdown`：可直接插入报告的 Markdown 图片引用
-- `relative_path`：图表相对路径
-- `chart_tag`：图表类型，如 `bar-line` / `radar` / `pie` / `funnel` / `treemap` / `sunburst` / `sankey` / `empty`
-- `debug_summary`：调试摘要信息
+- `markdown`
+- `relative_path`
+- `chart_tag`
 
 ## 7. 当前核心流程
 
-当前 MCP 的图表生成流程为两阶段：
+当前流程固定为两阶段：
 
-1. 先基于 `existing_refs` 直接尝试生成图表
-2. 如果首轮结果为 `empty` 或图表无效，则：
-   - 基于图表描述、基础 query、首轮失败原因做 LLM query planning
-   - 调用 aggSearch 补充检索
-   - 将 `existing_refs + 新检索文档` 合并后重新抽取与生成图表
+1. 基于 `existing_refs` 直接尝试成图
+2. 若首轮失败，则：
+   - 做一次 query planning
+   - 做一次 aggSearch 补搜
+   - 选取去重后的 top3 live docs
+   - 将 `existing insights + top3 live docs` 一起送入第二次图表生成
+
+说明：
+
+- 当前补搜轮数固定为 1 轮
+- 当前不再做文档抽取
+- 因此整条链路中最多只会有 2 次 LLM 调用
 
 ## 8. LLM 使用说明
 
-LLM 主要用于以下三个环节：
+当前只使用一套共享 LLM 配置。
+
+同一套 LLM 同时用于：
 
 - query planning
-- 信息抽取（JSON，function calling 优先）
-- 图表生成（基于 baseline prompt 直接输出 XML）
+- 图表生成
 
-图表生成阶段使用中文 baseline prompt，最终返回真实图表文件，而不是仅返回占位说明。
+支持的环境变量：
 
-当前支持为三个环节分别配置不同的 LLM：
+- `MCP_DEMO_LLM_BASE_URL`
+- `MCP_DEMO_LLM_API_KEY`
+- `MCP_DEMO_LLM_MODEL`
+- `MCP_DEMO_LLM_TIMEOUT_S`
+- `MCP_DEMO_REQUIRE_HTTPS`
+- `MCP_DEMO_FORCE_FUNCTION_CALL`
 
-- `planning`
-- `extraction`
-- `chart_generation`
-
-如果没有单独配置某个环节，则自动回退到全局默认 LLM 配置。
-
-### 通过环境变量配置
-
-可选的分阶段环境变量包括：
-
-- `MCP_DEMO_LLM_PLANNING_BASE_URL`
-- `MCP_DEMO_LLM_PLANNING_API_KEY`
-- `MCP_DEMO_LLM_PLANNING_MODEL`
-- `MCP_DEMO_LLM_PLANNING_TIMEOUT_S`
-- `MCP_DEMO_LLM_PLANNING_REQUIRE_HTTPS`
-- `MCP_DEMO_LLM_PLANNING_FORCE_FUNCTION_CALL`
-
-- `MCP_DEMO_LLM_EXTRACTION_BASE_URL`
-- `MCP_DEMO_LLM_EXTRACTION_API_KEY`
-- `MCP_DEMO_LLM_EXTRACTION_MODEL`
-- `MCP_DEMO_LLM_EXTRACTION_TIMEOUT_S`
-- `MCP_DEMO_LLM_EXTRACTION_REQUIRE_HTTPS`
-- `MCP_DEMO_LLM_EXTRACTION_FORCE_FUNCTION_CALL`
-
-- `MCP_DEMO_LLM_CHART_BASE_URL`
-- `MCP_DEMO_LLM_CHART_API_KEY`
-- `MCP_DEMO_LLM_CHART_MODEL`
-- `MCP_DEMO_LLM_CHART_TIMEOUT_S`
-- `MCP_DEMO_LLM_CHART_REQUIRE_HTTPS`
-- `MCP_DEMO_LLM_CHART_FORCE_FUNCTION_CALL`
-
-### 通过 tool 调用时传入 `config`
-
-调用方也可以在调用 `generate_chart_markdown` 时，通过 `config.llm` 传入三阶段配置：
+调用方也可以在 `generate_chart_markdown` 的 `config.llm` 中传入同一套配置：
 
 ```json
 {
-  "review_payload": { "...": "..." },
   "config": {
     "llm": {
-      "planning": {
-        "base_url": "https://a.example.com/v1",
-        "api_key": "sk-planning",
-        "model": "planning-model",
-        "timeout_s": 60,
-        "force_function_call": true
-      },
-      "extraction": {
-        "base_url": "https://b.example.com/v1",
-        "api_key": "sk-extraction",
-        "model": "extraction-model",
-        "timeout_s": 90,
-        "force_function_call": true
-      },
-      "chart_generation": {
-        "base_url": "https://c.example.com/v1",
-        "api_key": "sk-chart",
-        "model": "chart-model",
-        "timeout_s": 90
-      }
+      "base_url": "https://a.example.com/v1",
+      "api_key": "sk-xxx",
+      "model": "model-name",
+      "timeout_s": 90,
+      "force_function_call": true
     }
   }
 }
 ```
 
-字段说明：
+## 9. aggSearch 与渲染说明
 
-- `planning`：用于 query planning
-- `extraction`：用于 knowledges 抽取
-- `chart_generation`：用于 baseline prompt 图表生成
+- 当前仓库已经内置 aggSearch 请求逻辑，不再依赖仓库外的 `chart_search_recall_helper.py`
+- 运行环境仍需能访问配置好的 aggSearch endpoint
+- PNG 导出优先使用仓库内的 `vendor/echarts.min.js`
+- 每次渲染前会自动清理当前 `request_id` 目录中的旧图
+- 当前只保留 PNG，不再生成或保留 SVG
+- 运行环境必须具备本机无头 Edge/Chrome，PNG 导出失败时该次渲染会直接报错
 
-如果只想覆盖其中一个阶段，只传对应那一段即可。
-
-## 9. 运行依赖
+## 10. 运行依赖
 
 项目依赖和环境变量见仓库内：
 
@@ -227,11 +169,17 @@ LLM 主要用于以下三个环节：
 pip install -e .
 ```
 
-## 10. 输出目录
+## 11. 输出目录
 
-运行后，主要产物输出到以下目录：
+运行后主要产物会输出到：
 
 - `artifacts/charts/{request_id}/`
   - 最终图表图片
 - `outputs/`
   - html/json/txt 结果包
+
+## 12. 本地测试目录说明
+
+- `data/` 仅用于本地 case 回放和测试，不属于正式交付内容
+- 正式接入时不需要提供 `data/`
+- 当前仓库已忽略 `data/`，本地可保留，GitHub 交付不会受影响

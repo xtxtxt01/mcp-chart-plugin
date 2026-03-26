@@ -14,8 +14,9 @@ mcp = FastMCP(
         "Review-stage chart plugin. "
         "The server accepts chart tasks from review, uses aggSearch to retrieve chart materials, "
         "plans retrieval intent with one function-call schema, "
-        "extracts structured knowledges with another function-call schema, "
-        "and uses the original baseline prompt plus LLM to decide chart XML, "
+        "runs at most one supplementary retrieval round, "
+        "and uses one shared LLM configuration for both retrieval planning and chart generation, "
+        "feeding existing insights plus selected live docs into the second chart-generation attempt, "
         "then returns markdown image content."
     ),
 )
@@ -29,13 +30,6 @@ def generate_chart_markdown_tool(
 ) -> dict[str, Any]:
     """Generate chart markdown from a review-stage chart task."""
     return generate_chart_markdown(review_payload=review_payload, config_dict=config)
-
-
-@mcp.resource("resource://schemas/extract_chart_facts")
-def extract_chart_facts_schema_resource() -> str:
-    """Expose the function-call schema text for tools configuration."""
-    return schema_file_text("extract_chart_facts.tools.json")
-
 
 @mcp.resource("resource://schemas/plan_chart_retrieval")
 def plan_chart_retrieval_schema_resource() -> str:

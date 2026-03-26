@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "chart-plugin-mcp"
 version = "0.1.0"
-description = "Review-stage chart plugin MCP with aggSearch retrieval, function-call fact extraction, and baseline-style chart rendering."
+description = "Review-stage chart plugin MCP with single-round aggSearch retrieval and baseline-style chart rendering."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -38,4 +38,7 @@ MCP_demo.vendor = "vendor"
 MCP_demo = [
   "assets/*.txt",
   "schemas/*.json",
+]
+"MCP_demo.vendor" = [
+  "*.js",
 ]

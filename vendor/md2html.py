@@ -853,7 +853,7 @@ _html_template = '''\
         async function ensureEchartsLoaded() {
             if (typeof window.echarts !== 'undefined') return;
             const cdns = [    
-				'https://https://gcore.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js',
+				'https://gcore.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js',
                 'https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js',
                 'https://unpkg.com/echarts@5.4.3/dist/echarts.min.js'
             ];
@@ -880,7 +880,7 @@ _html_template = '''\
             },
 
             removeChapterNumerals(scope) {
-                const chapterNumeralRegex = /^[一二三四五六七八九十百千]+[、\.．]\s*/;
+                const chapterNumeralRegex = /^[一二三四五六七八九十百千]+[、\\.．]\\s*/;
                 scope.querySelectorAll('h2').forEach(h => {
                     h.textContent = h.textContent.replace(chapterNumeralRegex, '').trim();
                 });
@@ -889,7 +889,7 @@ _html_template = '''\
             transformMarkdownBold(scope) {
                 const textElementsSelector = 'p, li, td, th, blockquote';
                 const elements = scope.querySelectorAll(textElementsSelector);
-                const boldRegex = /\*\*([^*]+?)\*\*/g;
+                const boldRegex = /\\*\\*([^*]+?)\\*\\*/g;
 
                 elements.forEach(el => {
                     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);

@@ -12,9 +12,12 @@ from typing import Any
 
 from ..config import (
     CHART_ARTIFACTS_ROOT,
+    ECHARTS_VENDOR_PATH,
     MD2HTML_PATH,
     OUTPUTS_ROOT,
     RENDER_UTILS_PATH,
+    RENDER_TIMEOUT_S,
+    RENDER_VIRTUAL_TIME_BUDGET_MS,
     relative_to_demo,
 )
 
@@ -24,7 +27,6 @@ def _simple_markdown_to_html(page_title: str, markdown_text: str) -> str:
     return (
         "<!doctype html><html><head><meta charset='utf-8'/>"
         f"<title>{html.escape(page_title)}</title>"
-        "<script src='https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js'></script>"
         "<style>body{font-family:Arial,sans-serif;margin:24px;background:#f8fafc;color:#0f172a}"
         ".container{max-width:1200px;margin:0 auto;background:#fff;padding:24px;border-radius:16px;"
         "box-shadow:0 8px 24px rgba(15,23,42,.08)}</style></head>"
@@ -258,11 +260,21 @@ def _find_headless_browser() -> Path | None:
     return None
 
 
+def _echarts_script_tag() -> str:
+    if ECHARTS_VENDOR_PATH.exists():
+        try:
+            script_body = ECHARTS_VENDOR_PATH.read_text(encoding="utf-8")
+            return f"<script>{script_body}</script>"
+        except Exception:
+            pass
+    return "<script src='https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js'></script>"
+
+
 def _build_echarts_snapshot_html(option: dict[str, Any]) -> str:
     option_json = json.dumps(option, ensure_ascii=False)
     return (
         "<!doctype html><html><head><meta charset='utf-8'/>"
-        "<script src='https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js'></script>"
+        f"{_echarts_script_tag()}"
         "<style>"
         "html,body{margin:0;padding:0;width:1200px;height:720px;background:#f6f8fb;overflow:hidden;}"
         ".card{width:1136px;height:656px;margin:32px;border:1px solid #d9e2f2;border-radius:24px;background:#ffffff;"
@@ -280,15 +292,35 @@ def _build_echarts_snapshot_html(option: dict[str, Any]) -> str:
     )
 
 
-def _render_echarts_png(request_id: str, option: dict[str, Any]) -> Path | None:
+def _build_svg_snapshot_html(svg_markup: str) -> str:
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'/>"
+        "<style>"
+        "html,body{margin:0;padding:0;width:1200px;height:720px;background:#f6f8fb;overflow:hidden;}"
+        ".frame{width:1200px;height:720px;overflow:hidden;}"
+        "svg{display:block;width:1200px;height:720px;}"
+        "</style></head><body>"
+        f"<div class='frame'>{svg_markup}</div>"
+        "</body></html>"
+    )
+
+
+def _clear_chart_artifacts(target_dir: Path) -> None:
+    for name in ["chart_01.png", "chart_01.svg", "_echarts_render.html", "_svg_render.html"]:
+        try:
+            (target_dir / name).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _screenshot_html_to_png(target_dir: Path, html_file_name: str, html_content: str) -> Path:
     browser = _find_headless_browser()
     if browser is None:
-        return None
-    target_dir = CHART_ARTIFACTS_ROOT / request_id
+        raise RuntimeError("PNG rendering requires a local headless Edge or Chrome executable, but none was found.")
     target_dir.mkdir(parents=True, exist_ok=True)
-    html_path = target_dir / "_echarts_render.html"
+    html_path = target_dir / html_file_name
     png_path = target_dir / "chart_01.png"
-    html_path.write_text(_build_echarts_snapshot_html(option), encoding="utf-8")
+    html_path.write_text(html_content, encoding="utf-8")
     command = [
         str(browser),
         "--headless",
@@ -298,7 +330,7 @@ def _render_echarts_png(request_id: str, option: dict[str, Any]) -> Path | None:
         "--run-all-compositor-stages-before-draw",
         "--force-device-scale-factor=2",
         "--window-size=1200,720",
-        "--virtual-time-budget=4000",
+        f"--virtual-time-budget={RENDER_VIRTUAL_TIME_BUDGET_MS}",
         f"--screenshot={str(png_path)}",
         html_path.resolve().as_uri(),
     ]
@@ -307,17 +339,41 @@ def _render_echarts_png(request_id: str, option: dict[str, Any]) -> Path | None:
             command,
             capture_output=True,
             text=True,
-            timeout=20,
+            encoding="utf-8",
+            errors="replace",
+            timeout=RENDER_TIMEOUT_S,
             check=False,
         )
         if completed.returncode == 0 and png_path.exists():
             return png_path
+        error_text = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(
+            "Headless browser PNG rendering failed."
+            + (f" Browser output: {error_text[:500]}" if error_text else "")
+        )
     finally:
         try:
             html_path.unlink(missing_ok=True)
         except Exception:
             pass
-    return None
+
+
+def _render_echarts_png(request_id: str, option: dict[str, Any]) -> Path:
+    target_dir = CHART_ARTIFACTS_ROOT / request_id
+    return _screenshot_html_to_png(
+        target_dir,
+        "_echarts_render.html",
+        _build_echarts_snapshot_html(option),
+    )
+
+
+def _render_svg_markup_png(request_id: str, svg_markup: str) -> Path:
+    target_dir = CHART_ARTIFACTS_ROOT / request_id
+    return _screenshot_html_to_png(
+        target_dir,
+        "_svg_render.html",
+        _build_svg_snapshot_html(svg_markup),
+    )
 
 
 def _polar_to_cartesian(cx: float, cy: float, radius: float, angle: float) -> tuple[float, float]:
@@ -982,36 +1038,33 @@ def _render_generic_svg(title: str, chart_tag: str, explain: str, chart_data: di
 </svg>"""
 
 
-def _write_chart_svg(request_id: str, title: str, spec: dict[str, Any]) -> Path:
-    target_dir = CHART_ARTIFACTS_ROOT / request_id
-    target_dir.mkdir(parents=True, exist_ok=True)
-    svg_path = target_dir / "chart_01.svg"
+def _build_chart_svg(title: str, spec: dict[str, Any]) -> str:
     chart_tag = str(spec.get("chart_tag") or "empty")
     chart_data = spec.get("chart_data") or {}
     explain = str(spec.get("explain") or "")
     if chart_tag == "empty":
-        svg = _render_empty_svg(title, explain)
-    elif chart_tag == "bar-line":
-        svg = _render_bar_line_svg(title, chart_data)
-    elif chart_tag == "pie":
-        svg = _render_pie_svg(title, chart_data)
-    elif chart_tag == "radar":
-        svg = _render_radar_svg(title, chart_data)
-    elif chart_tag == "funnel":
-        svg = _render_funnel_svg(title, chart_data)
-    elif chart_tag == "treemap":
-        svg = _render_treemap_svg(title, chart_data)
-    elif chart_tag == "sunburst":
-        svg = _render_sunburst_svg(title, chart_data)
-    elif chart_tag == "sankey":
-        svg = _render_sankey_svg(title, chart_data)
-    else:
-        svg = _render_generic_svg(title, chart_tag, explain, chart_data)
-    svg_path.write_text(svg, encoding="utf-8")
-    return svg_path
+        return _render_empty_svg(title, explain)
+    if chart_tag == "bar-line":
+        return _render_bar_line_svg(title, chart_data)
+    if chart_tag == "pie":
+        return _render_pie_svg(title, chart_data)
+    if chart_tag == "radar":
+        return _render_radar_svg(title, chart_data)
+    if chart_tag == "funnel":
+        return _render_funnel_svg(title, chart_data)
+    if chart_tag == "treemap":
+        return _render_treemap_svg(title, chart_data)
+    if chart_tag == "sunburst":
+        return _render_sunburst_svg(title, chart_data)
+    if chart_tag == "sankey":
+        return _render_sankey_svg(title, chart_data)
+    return _render_generic_svg(title, chart_tag, explain, chart_data)
 
 
 def render_chart_artifacts(spec: dict[str, Any], request_id: str, title: str) -> dict[str, Any]:
+    target_dir = CHART_ARTIFACTS_ROOT / request_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    _clear_chart_artifacts(target_dir)
     raw_xml = chart_spec_to_xml(spec)
     parsed = _render_utils.parse_output(raw_xml)
     option = _render_utils.build_echarts_option(parsed)
@@ -1022,9 +1075,10 @@ def render_chart_artifacts(spec: dict[str, Any], request_id: str, title: str) ->
         raw_xml,
         extra={"subtitle": title},
     )
-    chart_path = _render_echarts_png(request_id=request_id, option=option) if option else None
-    if chart_path is None:
-        chart_path = _write_chart_svg(request_id=request_id, title=title, spec=spec)
+    if option:
+        chart_path = _render_echarts_png(request_id=request_id, option=option)
+    else:
+        chart_path = _render_svg_markup_png(request_id=request_id, svg_markup=_build_chart_svg(title, spec))
     txt_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.txt"
     json_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.json"
     html_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.html"
@@ -1032,7 +1086,8 @@ def render_chart_artifacts(spec: dict[str, Any], request_id: str, title: str) ->
         "success": True,
         "raw_xml": raw_xml,
         "payload": payload,
-        "svg_path": relative_to_demo(chart_path),
+        "relative_path": relative_to_demo(chart_path),
+        "png_path": relative_to_demo(chart_path),
         "image_path": relative_to_demo(chart_path),
         "txt_path": relative_to_demo(txt_path),
         "json_path": relative_to_demo(json_path),

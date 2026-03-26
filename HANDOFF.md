@@ -148,11 +148,7 @@ python -m MCP_demo.app.server
 
 ## 9. aggSearch 与渲染说明
 
-- 当前仓库已经内置 aggSearch 请求逻辑，不再依赖仓库外的 `chart_search_recall_helper.py`
 - 运行环境仍需能访问配置好的 aggSearch endpoint
-- PNG 导出优先使用仓库内的 `vendor/echarts.min.js`
-- 每次渲染前会自动清理当前 `request_id` 目录中的旧图
-- 当前只保留 PNG，不再生成或保留 SVG
 - 运行环境必须具备本机无头 Edge/Chrome，PNG 导出失败时该次渲染会直接报错
 
 ## 10. 运行依赖
@@ -178,8 +174,3 @@ pip install -e .
 - `outputs/`
   - html/json/txt 结果包
 
-## 12. 本地测试目录说明
-
-- `data/` 仅用于本地 case 回放和测试，不属于正式交付内容
-- 正式接入时不需要提供 `data/`
-- 当前仓库已忽略 `data/`，本地可保留，GitHub 交付不会受影响

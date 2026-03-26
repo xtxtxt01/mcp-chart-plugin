@@ -117,7 +117,7 @@ def _build_llm_decision_user_prompt(task: dict[str, Any], docs: list[dict[str, A
     context = _compact(task.get("write_requirement"))
     references = _reference_payload(docs)
     return (
-        "## 图表描述<description>\n"
+        "## 图表描述\n"
         f"{description}\n\n"
         "## 上文内容\n"
         "```markdown\n"

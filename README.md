@@ -310,13 +310,8 @@ aggSearch 请求由：
 - `artifacts/charts/{request_id}/`
   - 最终图表图片 `chart_01.png`
 
-## 13. 本地测试说明
 
-- `data/` 目录仅用于本地 CSV 回放和 case 调试
-- 正式接入不依赖 `data/`
-- 仓库默认不会上传 `data/`、`outputs/`、`artifacts/`
-
-## 14. 主要目录
+## 13. 主要目录
 
 ```text
 MCP_demo/
@@ -345,7 +340,7 @@ MCP_demo/
   HANDOFF.md
 ```
 
-## 15. 建议重点查看的调试字段
+## 14. 建议重点查看的调试字段
 
 - `debug_summary.final_stage`
   - 看最终停在哪一轮

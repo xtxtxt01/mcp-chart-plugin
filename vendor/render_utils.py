@@ -262,6 +262,17 @@ def _inside_bar_label_style() -> dict:
     }
 
 
+def _plain_value_label_style(color: str) -> dict:
+    return {
+        "show": True,
+        "fontSize": 12,
+        "fontWeight": "bold",
+        "color": color,
+        "textBorderColor": "#ffffff",
+        "textBorderWidth": 2,
+    }
+
+
 def _text_graphic(
     x: float,
     y: float,
@@ -400,9 +411,9 @@ def _bar_line_option(chart_data: dict) -> dict:
                     "lineStyle": {"width": 3},
                     "itemStyle": {"color": color},
                     "label": {
-                        **_value_label_style(color),
+                        **_plain_value_label_style(color),
                         "position": "top",
-                        "distance": 18 if has_bar else 10,
+                        "distance": 24 if has_bar else 10,
                         "formatter": "{c}",
                     },
                     "yAxisIndex": line_axis_index,
@@ -440,7 +451,7 @@ def _bar_line_option(chart_data: dict) -> dict:
                         {
                             **_inside_bar_label_style(),
                             "position": "insideTop",
-                            "distance": 18,
+                            "distance": 30,
                             "formatter": "{c}",
                         }
                         if has_line and not uses_timeline_fallback
@@ -798,9 +809,9 @@ def _funnel_option(chart_data: dict) -> dict:
                 {
                     "type": "funnel",
                     "left": "13%",
-                    "top": 104,
-                    "bottom": 52,
-                    "width": "74%",
+                    "top": 96,
+                    "bottom": 76,
+                    "width": "72%",
                     "sort": "descending",
                     "gap": 4,
                     "label": {"position": "inside"},

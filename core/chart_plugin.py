@@ -173,6 +173,15 @@ def _find_latest_report_dir() -> Path | None:
     return report_dirs[0]
 
 
+def _list_report_dirs() -> list[Path]:
+    work_root = _find_deepreport_work_root()
+    if work_root is None:
+        return []
+    report_dirs = [path for path in work_root.glob("report-*") if path.is_dir()]
+    report_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return report_dirs
+
+
 def _find_report_dir_for_path(output_path: str | None) -> Path | None:
     if output_path:
         path = Path(output_path).expanduser().resolve()
@@ -246,6 +255,69 @@ def _match_deepreport_chapter_index(report_dir: Path | None, chapter_title: str)
         if title_key == target_key or target_key in title_key or title_key in target_key:
             return idx
     return None
+
+
+def _report_dir_has_matching_chapter(report_dir: Path, chapter_title: str) -> bool:
+    chapters = _load_json_file(report_dir / "chapters.json")
+    if not isinstance(chapters, list):
+        return False
+    target_key = _normalize_title_key(chapter_title)
+    if not target_key:
+        return False
+    for item in chapters:
+        if not isinstance(item, dict):
+            continue
+        title_key = _normalize_title_key(item.get("title"))
+        if not title_key:
+            continue
+        if title_key == target_key or target_key in title_key or title_key in target_key:
+            return True
+    return False
+
+
+def _report_dir_contains_paragraph(report_dir: Path, paragraph_text: str) -> bool:
+    probe = _compact(paragraph_text)
+    if not probe:
+        return False
+    probe = probe[:80]
+    for name in ("report-reviewed.md", "report-raw.md", "report-enhance.md"):
+        path = report_dir / name
+        if not path.exists():
+            continue
+        try:
+            content = load_text_multi(path)
+        except Exception:
+            continue
+        if probe in content:
+            return True
+    return False
+
+
+def _find_report_dir_by_context(chapter_title: str, paragraph_text: str, output_path: str | None) -> Path | None:
+    from_path = _find_report_dir_for_path(output_path) if output_path else None
+    if from_path is not None:
+        return from_path
+
+    report_dirs = _list_report_dirs()
+    if not report_dirs:
+        return None
+
+    chapter_matches = [path for path in report_dirs if _report_dir_has_matching_chapter(path, chapter_title)]
+    if len(chapter_matches) == 1:
+        return chapter_matches[0]
+
+    for report_dir in chapter_matches:
+        if _report_dir_contains_paragraph(report_dir, paragraph_text):
+            return report_dir
+
+    if chapter_matches:
+        return chapter_matches[0]
+
+    for report_dir in report_dirs:
+        if _report_dir_contains_paragraph(report_dir, paragraph_text):
+            return report_dir
+
+    return report_dirs[0]
 
 
 def _build_fallback_refs(paragraph_text: str, chapter_context: str, *, limit: int = 4) -> list[dict[str, Any]]:
@@ -330,7 +402,7 @@ def build_deepreport_review_payload(
     config_dict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = _config_from_dict(config_dict)
-    report_dir = _find_report_dir_for_path(output_path)
+    report_dir = _find_report_dir_by_context(chapter_title, paragraph_text, output_path)
     chapter_index = _match_deepreport_chapter_index(report_dir, chapter_title)
     knowledge_refs = _build_knowledge_refs(report_dir, chapter_index)
     fallback_refs = _build_fallback_refs(paragraph_text, chapter_context)

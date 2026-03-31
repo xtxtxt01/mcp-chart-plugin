@@ -1,354 +1,192 @@
-# Chart Plugin MCP
+# chart_plugin_mcp
 
-用于 `review -> chart generation` 场景的标准 `stdio` 型 MCP。
+## 项目说明
+`chart_plugin_mcp` 是面向深度研究报告场景的图表增强服务。  
+该服务以 MCP 工具方式对外提供图表生成能力，供上游报告系统在“增强”阶段调用。系统会结合当前章节内容、段落上下文以及对应章节的知识文件，自动判断是否需要插入图表；满足成图条件时，生成图表图片并返回可直接插入报告的 Markdown 引用。
 
-它接收上游直接传入的 `review_payload`，优先基于已有 `existing_refs` 直接成图；如果首轮失败，则最多补搜 1 轮，并将 `existing insights + top3 live docs` 一起送入第二次图表生成。最终返回可直接插入报告的 Markdown 图片引用、PNG 相对路径，以及调试信息。
+本组件当前主要服务于 `deep-report-go` 主流程，也可作为独立的图表增强模块进行部署与复用。
 
-## 1. 当前能力边界
+## 核心能力
+- 面向报告正文自动识别适合图表表达的内容
+- 结合章节知识文件 `knowledge/chN.json` 提升成图质量与稳定性
+- 在现有上下文不足时进行补充检索
+- 自动选择图表类型并生成 ECharts 图表
+- 将图表渲染为 PNG 图片并返回 Markdown 图片引用
+- 支持与 `deep-report-go` 的增强阶段无缝集成
 
-- 只暴露一个正式 tool：`generate_chart_markdown`
-- 只暴露一个 schema resource：`resource://schemas/plan_chart_retrieval`
-- 整条链路最多两次 LLM 调用
-  - query planning
-  - chart generation
-- 只使用一套共享 LLM 配置
-- 补搜轮数固定为 1 轮
-- 第二轮只保留去重后的 top3 live docs
-- 不再做 live docs 文档抽取
-- 最终产物只保留 PNG，不再保留 SVG
-- 非空图表会尽量显式标出数值，便于直接插入报告
+## 适用场景
+- 深度研究报告
+- 行业研究与市场分析
+- 公司研究与竞品分析
+- 政策、规模、结构、趋势类报告增强
+- 需要在正文中自动插入图表的报告生成系统
 
-## 2. MCP 暴露内容
+## 对外工具
+当前服务对外提供一个工具：
 
-### Tool
+### `chart_generate`
+用于为当前报告段落生成图表。
 
-- `generate_chart_markdown`
+上游直接传入的主要字段包括：
+- `query`：整篇深度研究任务的原始问题
+- `chapter_title`：当前章节标题
+- `paragraph_text`：当前待增强段落内容
+- `paragraph_id`：当前段落编号
+- `chapter_context`：当前章节的补充上下文
+- `output_path`：可选，指定输出图片路径
+- `language`：语言参数，默认 `zh`
 
-### Resource
+服务内部会自动补充的上下文包括：
+- 当前报告目录中的 `chapters.json`
+- 当前章节对应的 `knowledge/chN.json`
+- 必要时触发的补充检索结果
 
-- `resource://schemas/plan_chart_retrieval`
+典型输出包括：
+- 是否成功成图
+- 图表类型
+- 图表图片路径
+- 可直接插入报告的 Markdown 内容
+- 调试摘要与补充检索信息
 
-## 3. 运行方式
+## 工作流程
+1. 上游报告系统在增强阶段选定某一章节、某一段落
+2. 通过 MCP 调用 `chart_generate`
+3. 服务根据 `chapter_title` 匹配对应章节，并优先加载该章节的 `knowledge/chN.json`
+4. 结合段落正文、章节上下文和知识文件构造图表任务
+5. 基于现有信息判断是否适合成图
+6. 如关键信息不足，则执行补充检索
+7. 选择合适图表类型并生成 PNG 图表
+8. 返回 Markdown 图片引用，供上游插入最终报告
 
-### 直接启动 MCP server
+## 目录结构
+- `deepreport_stdio.py`
+  - MCP stdio 服务入口，供上游通过子进程方式启动
+- `clients/`
+  - 大模型与检索客户端
+- `core/`
+  - 图表任务构造、图表决策、渲染与落盘主逻辑
+- `schemas/`
+  - 工具 schema 定义
+- `assets/`
+  - 图表决策 prompt 资源
+- `vendor/`
+  - ECharts 及渲染相关依赖
+- `config.py`
+  - 配置与环境变量读取
+- `.env.example`
+  - 环境变量示例
 
+## 运行要求
+建议部署前确认以下环境条件：
+- Python 3.11 及以上
+- 可用的大模型服务地址与 API Key
+- 可用的检索服务配置
+- Windows 环境下建议安装 Edge 或 Chrome，用于无头截图渲染
+
+## 环境变量
+本项目统一使用 `CHART_PLUGIN_*` 环境变量。
+
+常用配置如下：
+
+### 模型配置
+- `CHART_PLUGIN_LLM_BASE_URL`
+- `CHART_PLUGIN_LLM_API_KEY`
+- `CHART_PLUGIN_LLM_MODEL`
+- `CHART_PLUGIN_LLM_TIMEOUT_S`
+- `CHART_PLUGIN_REQUIRE_HTTPS`
+- `CHART_PLUGIN_FORCE_FUNCTION_CALL`
+
+### 检索配置
+- `CHART_PLUGIN_SEARCH_BACKEND`
+- `CHART_PLUGIN_IFLY_APP_ID`
+- `CHART_PLUGIN_IFLY_API_KEY`
+- `CHART_PLUGIN_IFLY_API_SECRET`
+- `CHART_PLUGIN_IFLY_ENDPOINT`
+- `CHART_PLUGIN_IFLY_PIPELINE_NAME`
+- `CHART_PLUGIN_IFLY_USER_ID`
+
+### 图表生成配置
+- `CHART_PLUGIN_MAX_QUERIES`
+- `CHART_PLUGIN_LIVE_DOCS_QUOTA`
+- `CHART_PLUGIN_RENDER_TIMEOUT_S`
+- `CHART_PLUGIN_RENDER_VIRTUAL_TIME_BUDGET_MS`
+
+
+## 启动方式
+推荐启动方式如下：
+
+### 方式一：模块启动
 ```powershell
-python -m MCP_demo
+python -m chart_plugin_mcp
 ```
 
-也可以使用：
+上述方式会启动 MCP stdio 服务，供上游以子进程方式拉起和调用。
 
-```powershell
-python -m MCP_demo.app.server
-```
+## 与 deep-report-go 的集成方式
+如需与 `deep-report-go` 主流程联动，建议按以下方式配置：
 
-### 安装为本地命令
+### 1. 安装本服务
+在 `chart_plugin_mcp` 目录执行：
 
 ```powershell
 pip install -e .
 ```
 
-安装后可直接运行：
+### 2. 在 `deep-report-go` 中配置增强服务
+在 `deep-report-go/config.yaml` 的 `mcp_enhancement_servers` 中增加或替换图表增强服务：
+
+```yaml
+- name: chart-plugin
+  command: py
+  args:
+    - -m
+    - chart_plugin_mcp.deepreport_stdio
+  env:
+    PYTHONPATH: C:/Users/xtyu9/Desktop/日志报告
+    CHART_PLUGIN_SEARCH_BACKEND: ifly_public
+    CHART_PLUGIN_IFLY_APP_ID: ${IFLY_APP_ID}
+    CHART_PLUGIN_IFLY_API_KEY: ${IFLY_API_KEY}
+    CHART_PLUGIN_IFLY_API_SECRET: ${IFLY_API_SECRET}
+    CHART_PLUGIN_IFLY_ENDPOINT: https://cbm-search-api.cn-huabei-1.xf-yun.com/biz/search
+    CHART_PLUGIN_IFLY_PIPELINE_NAME: pl_map_agg_search
+    CHART_PLUGIN_IFLY_USER_ID: user001
+    CHART_PLUGIN_AGG_TIMEOUT_MS: "30000"
+    CHART_PLUGIN_AGG_TOP_K: "10"
+    CHART_PLUGIN_LLM_BASE_URL: https://maas-api.cn-huabei-1.xf-yun.com/v1
+    CHART_PLUGIN_LLM_API_KEY: ${MAAS_API_KEY}
+    CHART_PLUGIN_LLM_MODEL: xopdeepseekv32
+    CHART_PLUGIN_LLM_TIMEOUT_S: "90"
+    CHART_PLUGIN_REQUIRE_HTTPS: "1"
+    CHART_PLUGIN_FORCE_FUNCTION_CALL: "1"
+    CHART_PLUGIN_RENDER_TIMEOUT_S: "45"
+    CHART_PLUGIN_RENDER_VIRTUAL_TIME_BUDGET_MS: "12000"
+```
+
+### 3. 准备主流程环境变量
+确保 `deep-report-go` 运行环境中已经配置：
+- `MAAS_API_KEY`
+- `IFLY_APP_ID`
+- `IFLY_API_KEY`
+- `IFLY_API_SECRET`
+
+### 4. 运行深度研究主流程
+在 `deep-report-go` 目录中执行：
 
 ```powershell
-chart-plugin-mcp
+.\deep-report.exe run --query "深度分析中国各家大模型厂商的竞争格局、技术路线与商业化进展" --mode deep --domain "行业研究"
 ```
 
-## 4. 运行前提
+在 `deep` 模式下，`deep-report-go` 会自动完成：
+- 工具发现
+- 工具参数注入
+- 图表调用
+- 图表结果插回报告
+
+## 输出结果
+成图成功时，服务会产出：
+- 图表 PNG 图片
+- 图表渲染相关中间结果
+- 可直接插入报告的 Markdown 图片引用
+
+在深度研究场景下，图表会优先复制到当前报告目录下的 `charts/` 子目录，便于与报告正文统一管理和交付。
 
-运行这版 MCP 需要：
-
-1. 一套可用的共享 LLM 配置
-2. 可访问的 aggSearch endpoint
-3. 本机可用的无头 Edge/Chrome，用于将图表截图导出为 PNG
-
-说明：
-
-- aggSearch endpoint 通过环境变量配置
-- PNG 导出依赖本机浏览器可执行文件
-
-## 5. 环境变量
-
-### LLM
-
-- `MCP_DEMO_LLM_BASE_URL`
-- `MCP_DEMO_LLM_API_KEY`
-- `MCP_DEMO_LLM_MODEL`
-- `MCP_DEMO_LLM_TIMEOUT_S`
-- `MCP_DEMO_REQUIRE_HTTPS`
-- `MCP_DEMO_FORCE_FUNCTION_CALL`
-
-### aggSearch
-
-- `MCP_DEMO_AGG_HOST`
-- `MCP_DEMO_AGG_HOST_HEADER`
-- `MCP_DEMO_AGG_PIPELINE`
-- `MCP_DEMO_AGG_TIMEOUT_MS`
-- `MCP_DEMO_AGG_TOP_K`
-
-### 其他
-
-- `MCP_DEMO_MAX_QUERIES`
-- `MCP_DEMO_LIVE_DOCS_QUOTA`
-- `MCP_DEMO_RENDER_TIMEOUT_S`
-- `MCP_DEMO_RENDER_VIRTUAL_TIME_BUDGET_MS`
-
-示例可参考：
-
-- `.env.example`
-
-## 6. 输入契约
-
-正式接入时，上游必须直接传入 `review_payload`。
-
-### 必填字段
-
-- `request_id`
-- `chart_title`
-- `chart_description`
-- `existing_refs`
-
-### 可选字段
-
-- `write_requirement`
-- `base_queries`
-- `language`
-
-### `existing_refs` 格式
-
-```json
-[
-  {
-    "id": 0,
-    "content": "已有参考资料或上游抽取结果"
-  }
-]
-```
-
-### `base_queries` 格式
-
-```json
-[
-  "基础检索 query 1",
-  "基础检索 query 2"
-]
-```
-
-### 最小输入示例
-
-```json
-{
-  "review_payload": {
-    "request_id": "case-001",
-    "chart_title": "图表标题",
-    "chart_description": "图表描述",
-    "write_requirement": "写作要求",
-    "existing_refs": [
-      {
-        "id": 0,
-        "content": "已有参考资料或上游抽取结果"
-      }
-    ],
-    "base_queries": [
-      "基础检索 query 1",
-      "基础检索 query 2"
-    ],
-    "language": "zh"
-  }
-}
-```
-
-## 7. 输出契约
-
-典型输出中的核心字段如下：
-
-```json
-{
-  "success": true,
-  "markdown": "![图表标题](artifacts/charts/case-001/chart_01.png)",
-  "relative_path": "artifacts/charts/case-001/chart_01.png",
-  "chart_tag": "radar",
-  "should_insert": true,
-  "empty_reason": "",
-  "debug_summary": {
-    "query_count": 0,
-    "live_hits_count": 0,
-    "selected_live_docs_count": 0,
-    "used_agg_search": false,
-    "attempt_count": 1,
-    "final_stage": "existing_insights_only"
-  }
-}
-```
-
-### 上游通常重点使用
-
-- `markdown`
-- `relative_path`
-- `chart_tag`
-- `should_insert`
-- `empty_reason`
-- `debug_summary`
-
-### `empty` 语义
-
-- 当 `chart_tag == "empty"` 时，MCP 不再返回可插入图片
-- 此时：
-  - `markdown == ""`
-  - `relative_path == ""`
-  - `should_insert == false`
-  - `empty_reason` 会返回不成图原因
-- 上游应据此跳过插图，而不是插入说明性占位图
-
-### 常见调试字段
-
-- `retrieval_plan`
-- `queries`
-- `live_search_overview`
-- `selected_live_docs`
-- `docs_for_generation`
-- `knowledges`
-- `chart_decision_debug`
-- `generation_attempts`
-- `retry_gap_report`
-
-## 8. 当前主流程
-
-### 第一轮
-
-1. 上游传入 `review_payload`
-2. 将 `existing_refs` 视为已有 insights
-3. 直接调用图表生成 LLM
-4. 若图表有效，直接渲染输出
-
-### 第二轮
-
-仅当首轮结果为 `empty` 或图表数据无效时触发：
-
-1. 基于图表任务和首轮失败原因做一次 query planning
-2. 调用 aggSearch 做一次补搜
-3. 对 live docs 去重后仅保留 top3
-4. 将 `existing insights + top3 live docs` 一起送入第二次图表生成
-5. 输出最终 PNG 图表
-
-## 9. `used_agg_search` 与补搜命中语义
-
-`debug_summary.used_agg_search` 的含义是：
-
-- 是否触发了第二轮补搜流程
-
-它不代表：
-
-- 一定搜到了文档
-
-真正表示补搜是否拿回新文档的是：
-
-- `debug_summary.live_hits_count`
-- `debug_summary.selected_live_docs_count`
-- `live_search_overview[*].document_count`
-
-也就是说，完全可能出现：
-
-- `used_agg_search = true`
-- 但 `live_hits_count = 0`
-
-这表示“补搜流程触发了，但没有拿到任何新文档”。
-
-## 10. LLM 配置
-
-当前只使用一套共享 LLM 配置。
-
-同一套 LLM 同时用于：
-
-- query planning
-- chart generation
-
-### 运行时通过 `config.llm` 覆盖
-
-```json
-{
-  "review_payload": { "...": "..." },
-  "config": {
-    "llm": {
-      "base_url": "https://a.example.com/v1",
-      "api_key": "sk-xxx",
-      "model": "model-name",
-      "timeout_s": 90,
-      "force_function_call": true
-    }
-  }
-}
-```
-
-兼容说明：
-
-- `config.llm` 可以直接传一套共享配置
-- 如果调用方仍传旧的分阶段结构，当前实现会取其中第一套可用配置作为共享 LLM 使用
-
-## 11. aggSearch 配置
-
-aggSearch 请求由：
-
-- `clients/agg_search.py`
-
-直接发往配置好的 endpoint。
-
-
-## 12. 渲染与产物
-
-### 渲染方式
-
-- 非空图表会先生成 ECharts option
-- 再通过本机无头 Edge/Chrome 打开临时 HTML 并截图成 PNG
-- `outputs/*.html` 主要用于调试和预览
-- 正式插入报告时，以上游消费 `markdown` / `relative_path` 为准
-
-### 输出目录
-
-- `outputs/`
-  - html/json/txt 结果包
-- `artifacts/charts/{request_id}/`
-  - 最终图表图片 `chart_01.png`
-
-
-## 13. 主要目录
-
-```text
-MCP_demo/
-  app/
-    server.py
-  clients/
-    agg_search.py
-    llm.py
-  core/
-    chart_plugin.py
-    baseline_decider.py
-    renderer.py
-  schemas/
-    function_schemas.py
-    plan_chart_retrieval.tools.json
-  assets/
-    baseline_chart_prompt.txt
-    query_planning_prompt.txt
-  vendor/
-    echarts.min.js
-    render_utils.py
-    md2html.py
-  config.py
-  .env.example
-  README.md
-  HANDOFF.md
-```
-
-## 14. 建议重点查看的调试字段
-
-- `debug_summary.final_stage`
-  - 看最终停在哪一轮
-- `debug_summary.live_hits_count`
-  - 看补搜总共拿回多少 live docs
-- `debug_summary.selected_live_docs_count`
-  - 看第二轮实际用了多少 live docs
-- `generation_attempts`
-  - 看每一轮的图表决策和上下文快照
-- `chart_decision_debug`
-  - 看最终 LLM 图表决策输出

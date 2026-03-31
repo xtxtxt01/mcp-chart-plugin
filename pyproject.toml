@@ -1,44 +1,41 @@
-[build-system]
+﻿[build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "chart-plugin-mcp"
 version = "0.1.0"
-description = "Review-stage chart plugin MCP with single-round aggSearch retrieval and baseline-style chart rendering."
+description = "Delivery-oriented chart MCP package for deep-report-go enhancement."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "mcp==1.17.0",
   "requests>=2.31.0",
 ]
 
 [project.scripts]
-chart-plugin-mcp = "MCP_demo.app.server:main"
+chart-plugin-mcp = "chart_plugin_mcp.deepreport_stdio:main"
 
 [tool.setuptools]
 packages = [
-  "MCP_demo",
-  "MCP_demo.app",
-  "MCP_demo.clients",
-  "MCP_demo.core",
-  "MCP_demo.schemas",
-  "MCP_demo.vendor",
+  "chart_plugin_mcp",
+  "chart_plugin_mcp.clients",
+  "chart_plugin_mcp.core",
+  "chart_plugin_mcp.schemas",
+  "chart_plugin_mcp.vendor",
 ]
 
 [tool.setuptools.package-dir]
-MCP_demo = "."
-MCP_demo.app = "app"
-MCP_demo.clients = "clients"
-MCP_demo.core = "core"
-MCP_demo.schemas = "schemas"
-MCP_demo.vendor = "vendor"
+chart_plugin_mcp = "."
+chart_plugin_mcp.clients = "clients"
+chart_plugin_mcp.core = "core"
+chart_plugin_mcp.schemas = "schemas"
+chart_plugin_mcp.vendor = "vendor"
 
 [tool.setuptools.package-data]
-MCP_demo = [
+chart_plugin_mcp = [
   "assets/*.txt",
   "schemas/*.json",
 ]
-"MCP_demo.vendor" = [
+"chart_plugin_mcp.vendor" = [
   "*.js",
 ]

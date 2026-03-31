@@ -20,7 +20,8 @@ SUPPORTED_CHART_TAGS = [
     "funnel",
 ]
 
-EMPTY_CHARTDATA_LITERALS = {"", "{}", "空", "empty", "none", "null", "n/a"}
+EMPTY_CHARTDATA_LITERALS = {"", "{}", "empty", "none", "null", "n/a"}
+
 
 def load_baseline_prompt() -> str:
     return load_text_multi(BASELINE_PROMPT_PATH)
@@ -117,14 +118,14 @@ def _build_llm_decision_user_prompt(task: dict[str, Any], docs: list[dict[str, A
     context = _compact(task.get("write_requirement"))
     references = _reference_payload(docs)
     return (
-        "## 图表描述\n"
+        "## Chart Description\n"
         f"{description}\n\n"
-        "## 上文内容\n"
+        "## Context\n"
         "```markdown\n"
         f"{context}\n"
         "```\n\n"
-        "## 参考资料\n"
-        "(如下资料中id为参考资料序号，content为资料内容)\n"
+        "## References\n"
+        "The following entries use `id` as the reference index and `content` as the source text.\n"
         f"{json.dumps(references, ensure_ascii=False, indent=2)}"
     )
 
@@ -159,7 +160,7 @@ def decide_chart_spec(
     ok, message = llm.available()
     if not ok:
         return _empty_spec(
-            "模型不可用，无法完成基于 baseline prompt 的图表决策，因此返回 empty。",
+            "The configured LLM is unavailable, so chart decision falls back to empty.",
             mode="llm_unavailable",
             error=message,
         )
@@ -171,7 +172,7 @@ def decide_chart_spec(
     )
     if not response.ok or not response.content:
         return _empty_spec(
-            "模型图表决策失败，无法得到合法 XML，因此返回 empty。",
+            "The model did not return usable chart-decision XML, so the plugin falls back to empty.",
             mode="llm_failed",
             error=_compact(response.error),
             raw_output=_compact(response.content),
@@ -180,7 +181,7 @@ def decide_chart_spec(
     parsed = _parse_chart_spec_xml(response.content)
     if parsed is None:
         return _empty_spec(
-            "模型返回内容不是合法的图表 XML，无法继续渲染，因此返回 empty。",
+            "The model response was not valid chart XML, so the plugin falls back to empty.",
             mode="llm_parse_failed",
             error="invalid_chart_xml",
             raw_output=response.content,

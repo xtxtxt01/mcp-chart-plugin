@@ -403,7 +403,7 @@ def _bar_line_option(chart_data: dict) -> dict:
                 {
                     "name": item.get("name", ""),
                     "type": "line",
-                    "data": [value if value is not None else 0 for value in numeric_values],
+                    "data": [value if value is not None else None for value in numeric_values],
                     "smooth": True,
                     "showSymbol": True,
                     "symbol": "circle",
@@ -439,7 +439,7 @@ def _bar_line_option(chart_data: dict) -> dict:
                         }
                     )
             else:
-                data = [value if value is not None else 0 for value in numeric_values]
+                data = [value if value is not None else None for value in numeric_values]
             normalized_series.append(
                 {
                     "name": item.get("name", ""),
@@ -470,10 +470,10 @@ def _bar_line_option(chart_data: dict) -> dict:
             "tooltip": {"trigger": "axis"},
             "legend": {"top": 56},
             "grid": {
-                "left": 72,
-                "right": 72,
-                "top": 112,
-                "bottom": 138 if needs_extra_bottom_room else 118,
+                "left": 56,
+                "right": 52,
+                "top": 100,
+                "bottom": 126 if needs_extra_bottom_room else 104,
                 "containLabel": True,
             },
             "xAxis": {
@@ -534,8 +534,8 @@ def _pie_option(chart_data: dict) -> dict:
             "series": [
                 {
                     "type": "pie",
-                    "radius": ["34%", "58%"],
-                    "center": ["50%", "57%"],
+                    "radius": ["36%", "60%"],
+                    "center": ["50%", "54%"],
                     "avoidLabelOverlap": True,
                     "itemStyle": {"borderColor": "#fff", "borderWidth": 2},
                     "label": {
@@ -575,13 +575,13 @@ def _radar_option(chart_data: dict) -> dict:
     graphic: list[dict] = []
     indicator_count = len(indicators)
     if indicator_count >= 3:
-        cx = 568.0
-        cy = 352.0
-        radius = 170.0
+        cx = 600.0
+        cy = 372.0
+        radius = 182.0
         angles = [(-math.pi / 2) + math.tau * idx / indicator_count for idx in range(indicator_count)]
         series_items = list(radar_data.items())
         for idx, (angle, indicator) in enumerate(zip(angles, indicators)):
-            label_radius = radius + 40
+            label_radius = radius + 36
             block_x = cx + label_radius * math.cos(angle)
             block_y = cy + label_radius * math.sin(angle)
             align = "center"
@@ -589,6 +589,11 @@ def _radar_option(chart_data: dict) -> dict:
                 align = "right"
             elif block_x > cx + 24:
                 align = "left"
+
+            if abs(math.cos(angle)) < 0.42 and math.sin(angle) < -0.82:
+                block_y -= 10
+            elif abs(math.cos(angle)) < 0.42 and math.sin(angle) > 0.82:
+                block_y -= 18
 
             name_lines = _wrap_axis_label_text(str(indicator.get("name") or ""), max_line_chars=8).split("\n")
             name_start_y = block_y - 12
@@ -604,20 +609,48 @@ def _radar_option(chart_data: dict) -> dict:
                     )
                 )
 
-            value_start_y = block_y + max(8, len(name_lines[:2]) * 12)
-            for series_idx, (_, values) in enumerate(series_items):
-                value = _safe_float(values[idx]) or 0.0
-                color = PALETTE[series_idx % len(PALETTE)]
-                graphic.append(
-                    _text_graphic(
-                        block_x,
-                        value_start_y + series_idx * 14,
-                        _format_number(value),
-                        color,
-                        font_size=12,
-                        text_align=align,
+            is_vertical_axis = abs(math.cos(angle)) < 0.42 and abs(math.sin(angle)) > 0.82
+            if is_vertical_axis:
+                value_start_y = block_y + max(8, len(name_lines[:2]) * 11 - 4)
+                split_index = math.ceil(len(series_items) / 2)
+                side_offset = 50 if len(series_items) <= 4 else 44
+                column_specs = [
+                    (series_items[:split_index], block_x - side_offset, "right"),
+                    (series_items[split_index:], block_x + side_offset, "left"),
+                ]
+                for items, column_x, column_align in column_specs:
+                    for row_idx, (_, values) in enumerate(items):
+                        value = _safe_float(values[idx])
+                        if value is None:
+                            continue
+                        color = PALETTE[(row_idx if column_align == "right" else split_index + row_idx) % len(PALETTE)]
+                        graphic.append(
+                            _text_graphic(
+                                column_x,
+                                value_start_y + row_idx * 14,
+                                _format_number(value),
+                                color,
+                                font_size=12,
+                                text_align=column_align,
+                            )
+                        )
+            else:
+                value_start_y = block_y + max(8, len(name_lines[:2]) * 12)
+                for series_idx, (_, values) in enumerate(series_items):
+                    value = _safe_float(values[idx])
+                    if value is None:
+                        continue
+                    color = PALETTE[series_idx % len(PALETTE)]
+                    graphic.append(
+                        _text_graphic(
+                            block_x,
+                            value_start_y + series_idx * 14,
+                            _format_number(value),
+                            color,
+                            font_size=12,
+                            text_align=align,
+                        )
                     )
-                )
 
     option = _base_option(chart_data.get("title", ""))
     option.update(
@@ -627,7 +660,7 @@ def _radar_option(chart_data: dict) -> dict:
             "radar": {
                 "indicator": indicators,
                 "center": ["50%", "54%"],
-                "radius": 170,
+                "radius": 182,
                 "splitArea": {"areaStyle": {"opacity": 0.16}},
                 "splitLine": {"lineStyle": {"opacity": 0.35}},
                 "axisName": {"show": False, "fontSize": 1, "color": "rgba(0,0,0,0)"},
@@ -729,8 +762,54 @@ def _sankey_option(chart_data: dict) -> dict:
     return option
 
 
+def _build_treemap_legend_graphics(items: list[dict]) -> list[dict]:
+    graphic: list[dict] = []
+    legend_x = 944.0
+    legend_y = 140.0
+    legend_gap = 44.0
+    for idx, item in enumerate(items[:8]):
+        entry_y = legend_y + idx * legend_gap
+        graphic.append(_rect_graphic(legend_x, entry_y - 8, 14, 14, str(item["color"])))
+        label_text = "\n".join(
+            [line for line in _wrap_axis_label_text(str(item["name"]), max_line_chars=10).split("\n") if line][:2]
+            + [_format_number(item["value"])]
+        )
+        graphic.append(
+            _text_graphic(
+                legend_x + 24,
+                entry_y,
+                label_text,
+                "#334155",
+                font_size=12,
+                text_align="left",
+            )
+        )
+    return graphic
+
+
 def _treemap_option(chart_data: dict) -> dict:
-    treemap_data = _decorate_series_items(chart_data.get("data", []), formatter="{b}\n{c}", child_key="children")
+    raw_items = [item for item in (chart_data.get("data", []) or []) if isinstance(item, dict)]
+    numeric_values = [_safe_float(item.get("value")) for item in raw_items if _safe_float(item.get("value")) is not None]
+    has_extreme_skew = (
+        len(numeric_values) >= 3
+        and min(numeric_values) > 0
+        and max(numeric_values) / min(numeric_values) >= 50
+    )
+    treemap_data = _decorate_series_items(raw_items, formatter="{b}", child_key="children")
+    legend_items = []
+    for idx, item in enumerate(raw_items):
+        value = _safe_float(item.get("value"))
+        if value is None:
+            continue
+        legend_items.append(
+            {
+                "name": str(item.get("name") or ""),
+                "value": value,
+                "color": (((item.get("itemStyle") or {}).get("color")) if isinstance(item.get("itemStyle"), dict) else None)
+                or PALETTE[idx % len(PALETTE)],
+            }
+        )
+    legend_items.sort(key=lambda item: item["value"], reverse=True)
     option = _base_option(chart_data.get("title", ""))
     option.update(
         {
@@ -738,11 +817,22 @@ def _treemap_option(chart_data: dict) -> dict:
             "series": [
                 {
                     "type": "treemap",
-                    "top": 84,
+                    "top": 78,
+                    "left": 24,
+                    "right": 248 if has_extreme_skew else 24,
+                    "bottom": 22,
                     "data": treemap_data,
                     "breadcrumb": {"show": False},
+                    "label": {
+                        "show": True,
+                        "formatter": "{b}\n{c}",
+                        "overflow": "breakAll",
+                        "fontSize": 12,
+                        "lineHeight": 15,
+                    },
                 }
             ],
+            "graphic": _build_treemap_legend_graphics(legend_items) if has_extreme_skew else [],
         }
     )
     return option

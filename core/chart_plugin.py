@@ -1,587 +1,671 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
+import shutil
+from pathlib import Path
 from typing import Any
 
-from ..clients.agg_search import AggSearchClient
-from ..clients.llm import SecureLLMClient, ToolCallResult
-from ..config import (
-    DemoConfig,
-    QUERY_PLANNING_PROMPT_PATH,
-)
+from ..clients import AggSearchClient, SecureLLMClient
+from ..config import PACKAGE_ROOT, PluginConfig
 from ..prompt_utils import load_text_multi
-from ..core.baseline_decider import decide_chart_spec
-from ..core.renderer import build_no_chart_result, render_chart_artifacts
-from ..schemas.function_schemas import plan_chart_retrieval_tools
+from ..schemas import plan_chart_retrieval_tools
+from .baseline_decider import decide_chart_spec
+from .renderer import build_no_chart_result, render_chart_artifacts
+
+NUMERIC_HINT_RE = re.compile(r"\d")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[\u3002\uff01\uff1f!?\uff1b;])")
+TITLE_NOISE_RE = re.compile(r"[\s\u3000:：,，.;；()（）\[\]【】'\"<>《》\-—_]+")
+CHAPTER_PREFIX_RE = re.compile(
+    r"^\s*(?:\u7b2c)?([0-9]+|[\u96f6\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u4e24]+)(?:[\u7ae0\u8282\u90e8\u7bc7])?[\u3001.\uff0e]"
+)
+KEYWORD_HINTS = [
+    "\u5360\u6bd4",
+    "\u5e02\u573a",
+    "\u89c4\u6a21",
+    "\u589e\u957f",
+    "\u589e\u901f",
+    "\u540c\u6bd4",
+    "\u9884\u6d4b",
+    "\u6570\u91cf",
+    "\u4efd\u989d",
+    "\u83b7\u6279",
+    "\u7a81\u7834",
+    "%",
+]
+CHINESE_DIGITS = {
+    "\u96f6": 0,
+    "\u4e00": 1,
+    "\u4e8c": 2,
+    "\u4e24": 2,
+    "\u4e09": 3,
+    "\u56db": 4,
+    "\u4e94": 5,
+    "\u516d": 6,
+    "\u4e03": 7,
+    "\u516b": 8,
+    "\u4e5d": 9,
+}
 
 
 def _compact(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _safe_float(value: Any) -> float | None:
-    if value in [None, ""]:
-        return None
+def _safe_int(value: Any) -> int | None:
     try:
-        return float(str(value).replace(",", ""))
+        return int(value)
     except Exception:
         return None
 
 
-def _safe_int(value: Any) -> int | None:
-    number = _safe_float(value)
-    return int(number) if number is not None else None
-
-
-def _ordered_unique(values: list[str]) -> list[str]:
-    result: list[str] = []
+def _ordered_unique(items: list[str], *, limit: int | None = None) -> list[str]:
     seen: set[str] = set()
-    for value in values:
-        item = _compact(value)
-        if not item:
+    ordered: list[str] = []
+    for item in items:
+        text = _compact(item)
+        if not text:
             continue
-        key = item.casefold()
+        key = text.casefold()
         if key in seen:
             continue
         seen.add(key)
-        result.append(item)
-    return result
+        ordered.append(text)
+        if limit is not None and len(ordered) >= limit:
+            break
+    return ordered
 
 
-def _config_from_dict(config_dict: dict[str, Any] | None) -> DemoConfig:
-    cfg = DemoConfig()
+def _trim_text(text: str, max_chars: int = 1800) -> str:
+    value = _compact(text)
+    if len(value) <= max_chars:
+        return value
+    return value[: max_chars - 3].rstrip() + "..."
+
+
+def _stable_hash(*parts: Any, length: int = 10) -> str:
+    joined = "\n".join(_compact(part) for part in parts if _compact(part))
+    return hashlib.sha1(joined.encode("utf-8", "ignore")).hexdigest()[:length]
+
+
+def _safe_path_token(text: str, default: str = "section") -> str:
+    normalized = re.sub(r"[^A-Za-z0-9]+", "-", _compact(text)).strip("-").lower()
+    return normalized[:32] or default
+
+
+def _config_from_dict(config_dict: dict[str, Any] | None) -> PluginConfig:
+    cfg = PluginConfig()
     cfg.apply_overrides(config_dict)
     return cfg
 
 
-def _fallback_queries(task: dict[str, Any], config: DemoConfig) -> list[str]:
-    queries: list[str] = []
-    queries.extend([str(item) for item in (task.get("base_queries") or []) if _compact(item)])
-    for field in ["chart_title", "chart_description"]:
-        value = _compact(task.get(field))
-        if value:
-            queries.append(value)
-    return _ordered_unique(queries)[: config.chart_max_queries]
+def _split_text_units(text: str) -> list[str]:
+    blocks = re.split(r"\n\s*\n", _compact(text))
+    units: list[str] = []
+    for block in blocks:
+        block = _compact(block)
+        if not block:
+            continue
+        if len(block) <= 240:
+            units.append(block)
+            continue
+        fragments = [_compact(item) for item in SENTENCE_SPLIT_RE.split(block) if _compact(item)]
+        if not fragments:
+            units.append(block)
+            continue
+        current = ""
+        for fragment in fragments:
+            if not current:
+                current = fragment
+                continue
+            if len(current) + len(fragment) <= 220:
+                current += fragment
+                continue
+            units.append(current)
+            current = fragment
+        if current:
+            units.append(current)
+    return units
 
 
-def _normalize_knowledge(item: dict[str, Any]) -> dict[str, Any]:
-    insight = _compact(item.get("insight"))
-    if not insight:
-        return {}
-    snippets = item.get("snippets")
-    normalized_snippets: list[str] = []
-    if isinstance(snippets, list):
-        for snippet in snippets:
-            value = _compact(snippet)
-            if value:
-                normalized_snippets.append(value)
+def _fragment_score(text: str) -> tuple[int, int]:
+    value = _compact(text)
+    score = 0
+    if NUMERIC_HINT_RE.search(value):
+        score += 10
+    for keyword in KEYWORD_HINTS:
+        if keyword in value:
+            score += 3
+    if 24 <= len(value) <= 220:
+        score += 2
+    return score, -len(value)
+
+
+def _prioritized_fragments(*texts: str, limit: int = 6) -> list[str]:
+    candidates: list[str] = []
+    for text in texts:
+        candidates.extend(_split_text_units(text))
+    ranked = sorted(_ordered_unique(candidates), key=_fragment_score, reverse=True)
+    return ranked[:limit]
+
+
+def _find_deepreport_work_root() -> Path | None:
+    candidates = [
+        PACKAGE_ROOT.parent / "ai-deepreport" / "deep-report-go" / "work",
+        PACKAGE_ROOT.parent / "deep-report-go" / "work",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _find_latest_report_dir() -> Path | None:
+    work_root = _find_deepreport_work_root()
+    if work_root is None:
+        return None
+    report_dirs = [path for path in work_root.glob("report-*") if path.is_dir()]
+    if not report_dirs:
+        return None
+    report_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return report_dirs[0]
+
+
+def _find_report_dir_for_path(output_path: str | None) -> Path | None:
+    if output_path:
+        path = Path(output_path).expanduser().resolve()
+        probe = path if path.is_dir() else path.parent
+        for current in [probe, *probe.parents]:
+            if current.name.startswith("report-"):
+                return current
+    return _find_latest_report_dir()
+
+
+def _load_json_file(path: Path) -> Any:
+    if not path.exists():
+        return None
+    return json.loads(load_text_multi(path))
+
+
+def _normalize_title_key(text: str) -> str:
+    return TITLE_NOISE_RE.sub("", _compact(text)).casefold()
+
+
+def _chinese_numeral_to_int(raw: str) -> int | None:
+    text = _compact(raw)
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if text == "\u5341":
+        return 10
+    if "\u5341" in text:
+        left, right = text.split("\u5341", 1)
+        tens = CHINESE_DIGITS.get(left, 1 if not left else None)
+        ones = CHINESE_DIGITS.get(right, 0 if not right else None)
+        if tens is None or ones is None:
+            return None
+        return tens * 10 + ones
+    if len(text) == 1 and text in CHINESE_DIGITS:
+        return CHINESE_DIGITS[text]
+    return None
+
+
+def _extract_chapter_index_from_title(chapter_title: str) -> int | None:
+    title = _compact(chapter_title)
+    match = CHAPTER_PREFIX_RE.search(title)
+    if not match:
+        return None
+    number = _chinese_numeral_to_int(match.group(1))
+    if number is None or number <= 0:
+        return None
+    return number - 1
+
+
+def _match_deepreport_chapter_index(report_dir: Path | None, chapter_title: str) -> int | None:
+    direct = _extract_chapter_index_from_title(chapter_title)
+    if direct is not None:
+        return direct
+    if report_dir is None:
+        return None
+    chapters = _load_json_file(report_dir / "chapters.json")
+    if not isinstance(chapters, list):
+        return None
+    target_key = _normalize_title_key(chapter_title)
+    if not target_key:
+        return None
+    for idx, item in enumerate(chapters):
+        if not isinstance(item, dict):
+            continue
+        title = _compact(item.get("title"))
+        title_key = _normalize_title_key(title)
+        if not title_key:
+            continue
+        if title_key == target_key or target_key in title_key or title_key in target_key:
+            return idx
+    return None
+
+
+def _build_fallback_refs(paragraph_text: str, chapter_context: str, *, limit: int = 4) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    fragments = _prioritized_fragments(paragraph_text, chapter_context, limit=limit)
+    for idx, fragment in enumerate(fragments):
+        refs.append({"id": idx, "content": _trim_text(fragment)})
+    if not refs and _compact(paragraph_text):
+        refs.append({"id": 0, "content": _trim_text(paragraph_text)})
+    return refs
+
+
+def _build_knowledge_refs(report_dir: Path | None, chapter_index: int | None, *, limit: int = 6) -> list[dict[str, Any]]:
+    if report_dir is None or chapter_index is None:
+        return []
+    knowledge_path = report_dir / "knowledge" / f"ch{chapter_index}.json"
+    payload = _load_json_file(knowledge_path)
+    if not isinstance(payload, list):
+        return []
+
+    candidates: list[tuple[tuple[int, int], dict[str, Any]]] = []
+    for idx, item in enumerate(payload):
+        if not isinstance(item, dict):
+            continue
+        insight = _compact(item.get("insight") or item.get("summary") or item.get("content"))
+        if not insight:
+            continue
+        source_title = _compact(item.get("sourceTitle"))
+        source_url = _compact(item.get("sourceUrl"))
+        content = insight
+        if source_title:
+            content += f"\n\nSource: {source_title}"
+        if source_url:
+            content += f"\nURL: {source_url}"
+        candidates.append((_fragment_score(insight), {"id": idx, "content": _trim_text(content)}))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [item for _, item in candidates[:limit]]
+
+
+def _merge_ref_lists(primary: list[dict[str, Any]], secondary: list[dict[str, Any]], *, limit: int = 10) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in [primary, secondary]:
+        for item in source:
+            if not isinstance(item, dict):
+                continue
+            content = _compact(item.get("content"))
+            if not content:
+                continue
+            key = hashlib.sha1(content.encode("utf-8", "ignore")).hexdigest()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({"id": len(merged), "content": content})
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def _fallback_queries(query: str, chapter_title: str, paragraph_text: str, chapter_context: str, *, limit: int = 6) -> list[str]:
+    fragments = _prioritized_fragments(paragraph_text, chapter_context, limit=3)
+    queries = [
+        f"{_compact(query)} {_compact(chapter_title)}",
+        f"{_compact(chapter_title)} \u6570\u636e \u5bf9\u6bd4",
+        f"{_compact(chapter_title)} \u5e02\u573a \u89c4\u6a21 \u5360\u6bd4",
+    ]
+    for fragment in fragments:
+        queries.append(f"{_compact(chapter_title)} {fragment[:72]}")
+    return _ordered_unique(queries, limit=limit)
+
+
+def build_deepreport_review_payload(
+    *,
+    query: str,
+    chapter_title: str,
+    paragraph_text: str,
+    paragraph_id: int | None,
+    chapter_context: str,
+    output_path: str | None,
+    language: str,
+    config_dict: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = _config_from_dict(config_dict)
+    report_dir = _find_report_dir_for_path(output_path)
+    chapter_index = _match_deepreport_chapter_index(report_dir, chapter_title)
+    knowledge_refs = _build_knowledge_refs(report_dir, chapter_index)
+    fallback_refs = _build_fallback_refs(paragraph_text, chapter_context)
+    existing_refs = _merge_ref_lists(knowledge_refs, fallback_refs, limit=8)
+
+    chapter_token = f"ch{chapter_index + 1}" if chapter_index is not None else _safe_path_token(chapter_title)
+    para_token = f"p{paragraph_id if paragraph_id is not None else 0}"
+    request_id = f"deepreport-{chapter_token}-{para_token}-{_stable_hash(query, chapter_title, paragraph_text, length=8)}"
+
+    fragments = _prioritized_fragments(paragraph_text, chapter_context, limit=3)
+    if fragments:
+        description = "\n".join(fragments)
+    else:
+        description = _trim_text(paragraph_text, 320)
+
     return {
-        "insight": insight,
-        "snippets": normalized_snippets,
+        "request_id": request_id,
+        "report_id": report_dir.name if report_dir else "deep-report-go",
+        "section_title": _compact(chapter_title),
+        "chart_title": f"{_compact(chapter_title)}\uff1a\u5173\u952e\u6570\u636e\u56fe\u793a",
+        "chart_description": description,
+        "write_requirement": "\n\n".join(
+            [
+                f"Query: {_compact(query)}",
+                f"Section: {_compact(chapter_title)}",
+                _trim_text(_compact(chapter_context), 2400),
+            ]
+        ).strip(),
+        "existing_refs": existing_refs,
+        "base_queries": _fallback_queries(query, chapter_title, paragraph_text, chapter_context, limit=cfg.chart_max_queries),
+        "language": _compact(language) or "zh",
+        "source_case": {
+            "report_dir": str(report_dir) if report_dir else "",
+            "chapter_index": chapter_index,
+            "paragraph_id": paragraph_id,
+        },
+        "_deepreport_context": {
+            "report_dir": str(report_dir) if report_dir else "",
+            "chapter_index": chapter_index,
+            "output_path": _compact(output_path),
+        },
     }
 
 
-def _knowledge_signature(item: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
-    return (
-        _compact(item.get("insight")),
-        tuple(str(snippet) for snippet in item.get("snippets") or []),
-    )
-
-
-def merge_and_dedupe_knowledges(knowledges: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    seen: set[tuple[str, tuple[str, ...]]] = set()
-    for raw_item in knowledges:
-        item = _normalize_knowledge(raw_item)
-        if not item:
-            continue
-        signature = _knowledge_signature(item)
-        if signature in seen:
-            continue
-        seen.add(signature)
-        result.append(item)
-    return result
-
-
-def _existing_refs_to_knowledges(task: dict[str, Any]) -> list[dict[str, Any]]:
-    knowledges: list[dict[str, Any]] = []
-    for idx, ref in enumerate(task.get("existing_refs") or []):
-        content = _compact(ref.get("content"))
+def _refs_to_docs(existing_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    for idx, item in enumerate(existing_refs):
+        content = _compact(item.get("content"))
         if not content:
             continue
-        source_index = _safe_int(ref.get("id"))
-        knowledges.append(
+        docs.append(
             {
-                "insight": content,
-                "snippets": [str(source_index if source_index is not None else idx)],
+                "prompt_id": idx,
+                "source_kind": "existing_knowledge",
+                "source_index": idx,
+                "title": f"existing_knowledge_{idx}",
+                "summary": _trim_text(content, 1000),
+                "content": content,
+                "url": "",
+                "query": "",
             }
         )
-    return merge_and_dedupe_knowledges(knowledges)
-
-
-def _knowledge_doc(item: dict[str, Any], prompt_id: int, *, source_kind: str) -> dict[str, Any]:
-    insight = _compact(item.get("insight"))
-    return {
-        "prompt_id": prompt_id,
-        "source_kind": source_kind,
-        "source_index": prompt_id,
-        "title": f"{source_kind}_{prompt_id}",
-        "summary": insight[:240],
-        "content": insight,
-        "url": "",
-        "query": "",
-        "query_index": -1,
-    }
-
-
-def _knowledge_docs(
-    existing_knowledges: list[dict[str, Any]],
-    new_knowledges: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    docs: list[dict[str, Any]] = []
-    prompt_id = 0
-    for item in existing_knowledges:
-        docs.append(_knowledge_doc(item, prompt_id, source_kind="existing_knowledge"))
-        prompt_id += 1
-    for item in new_knowledges or []:
-        docs.append(_knowledge_doc(item, prompt_id, source_kind="live_knowledge"))
-        prompt_id += 1
     return docs
 
 
-def _compose_generation_docs(
-    existing_knowledges: list[dict[str, Any]],
-    live_docs: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    docs = _knowledge_docs(existing_knowledges)
-    prompt_id = len(docs)
-    for raw_doc in live_docs or []:
-        doc = dict(raw_doc)
-        doc["prompt_id"] = prompt_id
-        doc["source_kind"] = "live_search"
-        doc["source_index"] = _safe_int(doc.get("source_index")) if _safe_int(doc.get("source_index")) is not None else prompt_id
-        doc["title"] = _compact(doc.get("title")) or f"live_search_doc_{prompt_id}"
-        doc["summary"] = _compact(doc.get("summary") or doc.get("content") or doc.get("title"))[:400]
-        doc["content"] = _compact(doc.get("content") or doc.get("summary") or doc.get("title"))
-        doc["url"] = _compact(doc.get("url"))
-        doc["query"] = _compact(doc.get("query"))
-        doc["query_index"] = _safe_int(doc.get("query_index")) if _safe_int(doc.get("query_index")) is not None else -1
-        docs.append(doc)
-        prompt_id += 1
-    return docs
+def _document_content(doc: dict[str, Any]) -> str:
+    for key in ("content", "text", "summary", "abstract", "desc", "snippet", "full_text"):
+        value = _compact(doc.get(key))
+        if value:
+            return value
+    values: list[str] = []
+    for key in ("segments", "snippets", "contentList"):
+        raw = doc.get(key)
+        if isinstance(raw, list):
+            values.extend(_compact(item) for item in raw if _compact(item))
+    return "\n".join(values)
 
 
-def _knowledge_preview(knowledges: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
-    preview: list[dict[str, Any]] = []
-    for idx, item in enumerate(knowledges[:limit]):
-        preview.append(
-            {
-                "index": idx,
-                "insight": _compact(item.get("insight"))[:240],
-                "snippets": [str(snippet) for snippet in (item.get("snippets") or [])],
-            }
-        )
-    return preview
-
-
-def _build_gap_report(task: dict[str, Any], spec: dict[str, Any], knowledges: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "chart_title": _compact(task.get("chart_title")),
-        "chart_description": _compact(task.get("chart_description")),
-        "first_attempt_chart_tag": _compact(spec.get("chart_tag") or "empty"),
-        "failure_reason": _compact(spec.get("explain") or spec.get("_decision_error")),
-        "decision_mode": _compact(spec.get("_decision_mode") or "unknown"),
-        "existing_knowledge_count": len(knowledges),
-        "existing_knowledge_preview": _knowledge_preview(knowledges),
-        "first_attempt_raw_output": _compact(spec.get("_decision_raw_output") or spec.get("_raw_output"))[:1200],
-    }
-
-
-def _build_query_planning_prompt(task: dict[str, Any], gap_report: dict[str, Any] | None = None) -> str:
-    ref_preview = []
-    for idx, ref in enumerate(task.get("existing_refs") or []):
-        ref_preview.append(
-            {
-                "id": _safe_int(ref.get("id")) if _safe_int(ref.get("id")) is not None else idx,
-                "content_preview": _compact(ref.get("content"))[:240],
-            }
-        )
-
-    gap_section = ""
-    if gap_report:
-        gap_section = (
-            "\n## 第一次成图失败情况\n"
-            f"{json.dumps(gap_report, ensure_ascii=False, indent=2)}\n\n"
-            "## 额外要求\n"
-            "- 你需要结合第一次失败原因，判断还缺哪些关键数据字段。\n"
-            "- 本轮 queries 应优先补齐缺口，不要重复搜索已经充分存在的信息。\n"
-            "- notes 里请明确写出：第一次为什么没能成图、本轮重点要补什么。\n"
-        )
-
-    return (
-        "## 图表任务\n"
-        f"- 图表标题：{_compact(task.get('chart_title'))}\n"
-        f"- 图表描述：{_compact(task.get('chart_description'))}\n"
-        f"- 写作要求：{_compact(task.get('write_requirement'))}\n\n"
-        "## 已有基础 queries\n"
-        f"{json.dumps(task.get('base_queries') or [], ensure_ascii=False, indent=2)}\n\n"
-        "## 已有上游 insights 预览\n"
-        f"{json.dumps(ref_preview, ensure_ascii=False, indent=2)}\n"
-        f"{gap_section}\n"
-        "## 输出要求\n"
-        "- comparison_mode 仅从 compare/trend/share/flow/hierarchy/funnel/multidim/other 中选择。\n"
-        "- queries 返回 3 到 8 条，且语言与任务一致。\n"
-        "- intent 中的 entities、metrics、dimensions 只写你能从任务中明确识别到的内容。\n"
-    )
-
-
-def _normalize_retrieval_plan(
-    task: dict[str, Any],
-    config: DemoConfig,
-    tool_result: ToolCallResult | None,
-) -> dict[str, Any]:
-    raw = tool_result.arguments if tool_result and isinstance(tool_result.arguments, dict) else {}
-    intent_raw = raw.get("intent") if isinstance(raw.get("intent"), dict) else {}
-    queries_raw = raw.get("queries") if isinstance(raw.get("queries"), list) else []
-
-    plan = {
-        "intent": {
-            "comparison_mode": _compact(intent_raw.get("comparison_mode")) or "other",
-            "entities": [str(item) for item in intent_raw.get("entities", []) if _compact(item)],
-            "metrics": [str(item) for item in intent_raw.get("metrics", []) if _compact(item)],
-            "dimensions": [str(item) for item in intent_raw.get("dimensions", []) if _compact(item)],
-            "chart_type_hints": [str(item) for item in intent_raw.get("chart_type_hints", []) if _compact(item)],
-            "must_have_fields": [str(item) for item in intent_raw.get("must_have_fields", []) if _compact(item)],
-            "time_hints": [str(item) for item in intent_raw.get("time_hints", []) if _compact(item)],
-            "region_hints": [str(item) for item in intent_raw.get("region_hints", []) if _compact(item)],
-            "query_language": _compact(intent_raw.get("query_language") or task.get("language") or "zh"),
-        },
-        "queries": [str(item) for item in queries_raw if _compact(item)],
-        "notes": _compact(raw.get("notes")),
-    }
-
-    if not plan["queries"]:
-        plan["queries"] = _fallback_queries(task, config)
-        plan["_planning_mode"] = "fallback_queries"
-    else:
-        plan["queries"] = _ordered_unique(plan["queries"])[: config.chart_max_queries]
-        plan["_planning_mode"] = "llm"
-
-    plan["_planning_error"] = _compact(tool_result.error if tool_result else "")
-    plan["_planning_raw_output"] = _compact(tool_result.content if tool_result else "")
-    return plan
-
-
-def plan_chart_retrieval(
-    task: dict[str, Any],
-    config: DemoConfig,
-    gap_report: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    llm = SecureLLMClient(config)
-    result: ToolCallResult | None = None
-    if llm.available()[0]:
-        result = llm.call_with_tools(
-            system_prompt=load_text_multi(QUERY_PLANNING_PROMPT_PATH),
-            user_prompt=_build_query_planning_prompt(task, gap_report=gap_report),
-            tools=plan_chart_retrieval_tools(),
-            tool_name="plan_chart_retrieval",
-            temperature=0.0,
-        )
-    return _normalize_retrieval_plan(task, config, result)
-
-
-def expand_queries(task: dict[str, Any], retrieval_plan: dict[str, Any], config: DemoConfig) -> list[str]:
-    queries = [str(item) for item in (retrieval_plan.get("queries") or []) if _compact(item)]
+def _normalize_retrieval_plan(raw_args: dict[str, Any] | None, payload: dict[str, Any], cfg: PluginConfig, *, mode: str, error: str = "", raw_output: str = "") -> dict[str, Any]:
+    args = raw_args or {}
+    intent = args.get("intent") if isinstance(args.get("intent"), dict) else {}
+    raw_queries = args.get("queries") if isinstance(args.get("queries"), list) else []
+    queries = [str(item).strip() for item in raw_queries if str(item).strip()]
     if not queries:
-        queries = _fallback_queries(task, config)
-    return _ordered_unique(queries)[: config.chart_max_queries]
-
-
-def _live_doc(doc: dict[str, Any], *, query: str, query_index: int) -> dict[str, Any]:
-    title = _compact(doc.get("name") or doc.get("title"))
-    summary = _compact(doc.get("summary") or doc.get("snippet") or doc.get("abstract"))
-    content = _compact(doc.get("content") or doc.get("text") or summary or title)
-    url = _compact(doc.get("url") or doc.get("link"))
+        queries = payload.get("base_queries") or []
+    queries = _ordered_unique(queries, limit=cfg.chart_max_queries)
     return {
-        "source_kind": "live_search",
-        "source_index": None,
-        "title": title or f"live_search_doc_{query_index}",
-        "summary": summary[:400],
-        "content": content,
-        "url": url,
-        "query": _compact(query),
-        "query_index": query_index,
+        "intent": intent,
+        "queries": queries,
+        "notes": _compact(args.get("notes")),
+        "_planning_mode": mode,
+        "_planning_error": error,
+        "_planning_raw_output": raw_output,
     }
 
 
-def search_documents(task: dict[str, Any], queries: list[str], config: DemoConfig) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    documents: list[dict[str, Any]] = []
-    client = AggSearchClient(config)
-    results = client.search_many(queries, request_id=_compact(task.get("request_id")))
+def plan_chart_retrieval(payload: dict[str, Any], cfg: PluginConfig) -> dict[str, Any]:
+    llm = SecureLLMClient(cfg)
+    ok, message = llm.available()
+    if not ok:
+        return _normalize_retrieval_plan(None, payload, cfg, mode="fallback", error=message)
 
-    live_overview: list[dict[str, Any]] = []
-    for result in results:
-        raw_docs = result.get("documents") or []
-        for doc in raw_docs:
-            documents.append(
-                _live_doc(
-                    doc,
-                    query=result.get("query", ""),
-                    query_index=int(result.get("query_index") or 0),
-                )
-            )
-        live_overview.append(
-            {
-                "query_index": result.get("query_index"),
-                "query": result.get("query"),
-                "success": bool(result.get("success")),
-                "status_code": result.get("status_code"),
-                "document_count": len(raw_docs),
-                "top_titles": [_compact(doc.get("name") or doc.get("title")) for doc in raw_docs[:3]],
-                "error": _compact(result.get("error")),
-            }
+    refs_block = []
+    for item in payload.get("existing_refs") or []:
+        if isinstance(item, dict):
+            refs_block.append(f"[{item.get('id', 0)}] {_trim_text(_compact(item.get('content')), 420)}")
+
+    system_prompt = (
+        "You are a chart retrieval planner. Return focused supplementary search queries for a single charting task. "
+        "Keep the plan narrow and retrieval-oriented."
+    )
+    user_prompt = "\n\n".join(
+        [
+            f"Chart title:\n{_compact(payload.get('chart_title'))}",
+            f"Chart description:\n{_compact(payload.get('chart_description'))}",
+            f"Write requirement:\n{_compact(payload.get('write_requirement'))}",
+            "Existing refs:\n" + ("\n".join(refs_block) if refs_block else "None"),
+            "Seed queries:\n" + "\n".join(payload.get("base_queries") or []),
+        ]
+    )
+    response = llm.call_with_tools(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        tools=plan_chart_retrieval_tools(),
+        tool_name="plan_chart_retrieval",
+        temperature=0.0,
+    )
+    if not response.ok or not isinstance(response.arguments, dict):
+        return _normalize_retrieval_plan(
+            None,
+            payload,
+            cfg,
+            mode="fallback",
+            error=_compact(response.error),
+            raw_output=_compact(response.content),
         )
-    return documents, results, live_overview
-
-
-def _doc_identity(doc: dict[str, Any]) -> tuple[str, str, str]:
-    return (
-        _compact(doc.get("title")).casefold(),
-        _compact(doc.get("url")).casefold(),
-        _compact(doc.get("content"))[:160].casefold(),
+    return _normalize_retrieval_plan(
+        response.arguments,
+        payload,
+        cfg,
+        mode="llm",
+        error=_compact(response.error),
+        raw_output=_compact(response.content),
     )
 
 
-def prepare_live_docs_for_generation(
-    documents: list[dict[str, Any]],
-    config: DemoConfig,
-) -> list[dict[str, Any]]:
-    if not documents:
+def search_documents(queries: list[str], request_id: str, cfg: PluginConfig) -> list[dict[str, Any]]:
+    if not queries:
         return []
+    client = AggSearchClient(cfg)
+    return client.search_many(queries, request_id=request_id)
 
-    live_doc_limit = max(0, min(config.chart_live_docs_quota, 3))
-    if live_doc_limit == 0:
-        return []
 
+def prepare_live_docs_for_generation(search_results: list[dict[str, Any]], *, start_prompt_id: int, quota: int) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for doc in documents:
-        identity = _doc_identity(doc)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        selected.append(dict(doc))
-        if len(selected) >= live_doc_limit:
-            break
+    seen: set[str] = set()
+    prompt_id = start_prompt_id
+    for result in search_results:
+        query = _compact(result.get("query"))
+        for doc in result.get("documents") or []:
+            if not isinstance(doc, dict):
+                continue
+            content = _compact(_document_content(doc))
+            if not content:
+                continue
+            title = _compact(doc.get("title") or doc.get("name")) or "live_search"
+            url = _compact(doc.get("url") or doc.get("link"))
+            identity = hashlib.sha1(f"{title}\n{url}\n{content}".encode("utf-8", "ignore")).hexdigest()
+            if identity in seen:
+                continue
+            seen.add(identity)
+            selected.append(
+                {
+                    "prompt_id": prompt_id,
+                    "source_kind": "live_search",
+                    "source_index": prompt_id,
+                    "title": title,
+                    "summary": _trim_text(content, 1000),
+                    "content": _trim_text(content, 3000),
+                    "url": url,
+                    "query": query,
+                }
+            )
+            prompt_id += 1
+            if len(selected) >= quota:
+                return selected
     return selected
 
 
-def _brief_reference(doc: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "prompt_id": _safe_int(doc.get("prompt_id")),
-        "source_kind": _compact(doc.get("source_kind")),
-        "source_index": _safe_int(doc.get("source_index")),
-        "title": _compact(doc.get("title")),
-        "summary": _compact(doc.get("summary"))[:240],
-        "url": _compact(doc.get("url")),
-        "query": _compact(doc.get("query")),
-    }
-
-
-def _skipped_retrieval_plan(task: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "intent": {
-            "comparison_mode": "unknown",
-            "entities": [],
-            "metrics": [],
-            "dimensions": [],
-            "chart_type_hints": [],
-            "must_have_fields": [],
-            "time_hints": [],
-            "region_hints": [],
-            "query_language": _compact(task.get("language") or "zh"),
-        },
-        "queries": [],
-        "notes": "First pass used existing insights directly, so agg retrieval planning was skipped.",
-        "_planning_mode": "skipped_existing_insights",
-        "_planning_error": "",
-        "_planning_raw_output": "",
-    }
-
-
-def _needs_agg_retry(spec: dict[str, Any]) -> bool:
-    chart_tag = _compact(spec.get("chart_tag")).casefold()
-    if chart_tag in {"", "empty", "null"}:
-        return True
-    chart_data = spec.get("chart_data")
-    return chart_data in [None, {}]
-
-
 def _is_empty_chart(spec: dict[str, Any]) -> bool:
-    return _compact(spec.get("chart_tag")).casefold() in {"", "empty", "null"}
+    return _compact(spec.get("chart_tag")) == "empty"
 
 
-def _attempt_snapshot(
+def _absolute_render_path(render_result: dict[str, Any]) -> Path | None:
+    relative_path = _compact(render_result.get("png_path") or render_result.get("relative_path"))
+    if not relative_path:
+        return None
+    return (PACKAGE_ROOT / relative_path).resolve()
+
+
+def _default_output_path(report_dir: Path | None, request_id: str, rendered_path: Path | None) -> Path | None:
+    if report_dir is not None:
+        return (report_dir / "charts" / f"{request_id}.png").resolve()
+    return rendered_path.resolve() if rendered_path is not None else None
+
+
+def _markdown_target(report_dir: Path | None, absolute_path: Path | None) -> str:
+    if absolute_path is None:
+        return ""
+    if report_dir is None:
+        return absolute_path.resolve().as_uri()
+    relative = os.path.relpath(absolute_path, report_dir)
+    relative_posix = Path(relative).as_posix()
+    return relative_posix if relative_posix.startswith(".") else f"./{relative_posix}"
+
+
+def generate_chart_for_deepreport(
     *,
-    stage: str,
-    retrieval_plan: dict[str, Any],
-    queries: list[str],
-    selected_live_docs: list[dict[str, Any]],
-    docs_for_generation: list[dict[str, Any]],
-    knowledges: list[dict[str, Any]],
-    spec: dict[str, Any],
-    used_agg_search: bool,
-    live_hits_count: int,
+    query: str,
+    chapter_title: str,
+    paragraph_text: str,
+    paragraph_id: int | None = None,
+    chapter_context: str = "",
+    output_path: str | None = None,
+    language: str = "zh",
+    config_dict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "stage": stage,
-        "used_agg_search": used_agg_search,
-        "planning_mode": _compact(retrieval_plan.get("_planning_mode")),
-        "query_count": len(queries),
-        "live_hits_count": live_hits_count,
-        "selected_live_docs_count": len(selected_live_docs),
-        "docs_for_generation_count": len(docs_for_generation),
-        "knowledge_count": len(knowledges),
-        "chart_tag": _compact(spec.get("chart_tag") or "empty"),
-        "decision_mode": _compact(spec.get("_decision_mode") or "unknown"),
-    }
-
-
-def generate_chart_markdown(review_payload: dict[str, Any], config_dict: dict[str, Any] | None = None) -> dict[str, Any]:
-    config = _config_from_dict(config_dict)
-    task = dict(review_payload)
-
-    generation_attempts: list[dict[str, Any]] = []
-    gap_report: dict[str, Any] | None = None
-
-    existing_knowledges = _existing_refs_to_knowledges(task)
-    initial_retrieval_plan = _skipped_retrieval_plan(task)
-    initial_queries: list[str] = []
-    initial_search_results: list[dict[str, Any]] = []
-    initial_live_search_overview: list[dict[str, Any]] = []
-    initial_selected_live_docs: list[dict[str, Any]] = []
-    initial_docs_for_generation = _compose_generation_docs(existing_knowledges)
-    initial_spec = decide_chart_spec(
-        task,
-        existing_knowledges,
-        config=config,
-        docs=initial_docs_for_generation,
-        retrieval_plan=initial_retrieval_plan,
+    cfg = _config_from_dict(config_dict)
+    payload = build_deepreport_review_payload(
+        query=query,
+        chapter_title=chapter_title,
+        paragraph_text=paragraph_text,
+        paragraph_id=paragraph_id,
+        chapter_context=chapter_context,
+        output_path=output_path,
+        language=language,
+        config_dict=config_dict,
     )
-    generation_attempts.append(
-        _attempt_snapshot(
-            stage="existing_insights_only",
-            retrieval_plan=initial_retrieval_plan,
-            queries=initial_queries,
-            selected_live_docs=initial_selected_live_docs,
-            docs_for_generation=initial_docs_for_generation,
-            knowledges=existing_knowledges,
-            spec=initial_spec,
-            used_agg_search=False,
-            live_hits_count=0,
-        )
-    )
+    request_id = _compact(payload.get("request_id")) or f"deepreport-{_stable_hash(query, chapter_title, paragraph_text)}"
+    chart_title = _compact(payload.get("chart_title")) or _compact(chapter_title) or "Chart"
+    report_dir_raw = _compact((payload.get("_deepreport_context") or {}).get("report_dir"))
+    report_dir = Path(report_dir_raw) if report_dir_raw else _find_report_dir_for_path(output_path)
 
-    if _needs_agg_retry(initial_spec):
-        gap_report = _build_gap_report(task, initial_spec, existing_knowledges)
-        retrieval_plan = plan_chart_retrieval(task, config, gap_report=gap_report)
-        queries = expand_queries(task, retrieval_plan, config)
-        live_documents, search_results, live_search_overview = search_documents(task, queries, config)
-        selected_live_docs = prepare_live_docs_for_generation(live_documents, config)
-        knowledges = existing_knowledges
-        docs_for_generation = _compose_generation_docs(existing_knowledges, selected_live_docs)
-        spec = decide_chart_spec(
-            task,
-            knowledges,
-            config=config,
-            docs=docs_for_generation,
-            retrieval_plan=retrieval_plan,
-        )
-        live_hits_count = sum(len(result.get("documents") or []) for result in search_results)
-        generation_attempts.append(
-            _attempt_snapshot(
-                stage="existing_insights_plus_top_live_docs",
-                retrieval_plan=retrieval_plan,
-                queries=queries,
-                selected_live_docs=selected_live_docs,
-                docs_for_generation=docs_for_generation,
-                knowledges=knowledges,
-                spec=spec,
-                used_agg_search=True,
-                live_hits_count=live_hits_count,
-            )
-        )
-    else:
-        retrieval_plan = initial_retrieval_plan
-        queries = initial_queries
-        search_results = initial_search_results
-        live_search_overview = initial_live_search_overview
-        selected_live_docs = initial_selected_live_docs
-        docs_for_generation = initial_docs_for_generation
-        knowledges = existing_knowledges
-        spec = initial_spec
-        live_hits_count = 0
+    retrieval_plan = plan_chart_retrieval(payload, cfg)
+    existing_docs = _refs_to_docs(payload.get("existing_refs") or [])
+    docs_for_generation = list(existing_docs)
+    first_spec = decide_chart_spec(payload, [], config=cfg, docs=docs_for_generation, retrieval_plan=retrieval_plan)
+    final_spec = first_spec
+    search_results: list[dict[str, Any]] = []
+    live_docs: list[dict[str, Any]] = []
 
-    title = _compact(task.get("chart_title") or task.get("chart_description") or "Chart")
-    chart_tag = _compact(spec.get("chart_tag") or "empty")
-    is_empty_chart = _is_empty_chart(spec)
-    if is_empty_chart:
-        render_result = build_no_chart_result(spec, _compact(task.get("request_id")), title)
-    else:
-        render_result = render_chart_artifacts(spec, _compact(task.get("request_id")), title)
+    if _is_empty_chart(first_spec) and retrieval_plan.get("queries"):
+        search_results = search_documents(retrieval_plan.get("queries") or [], request_id, cfg)
+        live_docs = prepare_live_docs_for_generation(
+            search_results,
+            start_prompt_id=len(existing_docs),
+            quota=cfg.chart_live_docs_quota,
+        )
+        if live_docs:
+            docs_for_generation = existing_docs + live_docs
+            final_spec = decide_chart_spec(payload, [], config=cfg, docs=docs_for_generation, retrieval_plan=retrieval_plan)
 
-    decision_mode = _compact(spec.get("_decision_mode") or "unknown")
-    decision_error = _compact(spec.get("_decision_error"))
-    decision_raw_output = _compact(spec.get("_decision_raw_output") or spec.get("_raw_output"))
-    empty_reason = _compact(spec.get("explain") or decision_error)
-    selected_live_doc_refs = [_brief_reference(doc) for doc in selected_live_docs]
-    generation_refs = [_brief_reference(doc) for doc in docs_for_generation]
+    if _is_empty_chart(final_spec):
+        bundle = build_no_chart_result(final_spec, request_id, chart_title)
+        return {
+            "success": True,
+            "request_id": request_id,
+            "chart_tag": "empty",
+            "should_insert": False,
+            "empty_reason": _compact(final_spec.get("explain") or final_spec.get("_decision_error")),
+            "relative_path": "",
+            "absolute_path": "",
+            "markdown": "",
+            "markdown_for_deepreport": "",
+            "retrieval_plan": retrieval_plan,
+            "queries": retrieval_plan.get("queries") or [],
+            "docs_for_generation": docs_for_generation,
+            "chart_decision_debug": {
+                "decision_mode": _compact(final_spec.get("_decision_mode")),
+                "decision_error": _compact(final_spec.get("_decision_error")),
+                "decision_raw_output": _compact(final_spec.get("_decision_raw_output")),
+            },
+            "debug_summary": {
+                "existing_refs_count": len(payload.get("existing_refs") or []),
+                "query_count": len(retrieval_plan.get("queries") or []),
+                "live_hits_count": sum(len(item.get("documents") or []) for item in search_results),
+                "selected_live_docs_count": len(live_docs),
+                "docs_for_generation_count": len(docs_for_generation),
+                "chart_tag": "empty",
+                "decision_mode": _compact(final_spec.get("_decision_mode")),
+            },
+            **bundle,
+        }
+
+    render_result = render_chart_artifacts(final_spec, request_id, chart_title)
+    rendered_path = _absolute_render_path(render_result)
+    target_path = Path(output_path).resolve() if _compact(output_path) else _default_output_path(report_dir, request_id, rendered_path)
+    if target_path is not None and rendered_path is not None and rendered_path.exists() and target_path.resolve() != rendered_path.resolve():
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(rendered_path, target_path)
+    elif target_path is None:
+        target_path = rendered_path
+
+    markdown_target = _markdown_target(report_dir, target_path)
+    markdown = f"![{chart_title}]({markdown_target})" if markdown_target else ""
 
     return {
         "success": True,
-        "markdown": render_result["markdown"],
-        "relative_path": render_result["relative_path"],
-        "chart_tag": chart_tag,
-        "should_insert": not is_empty_chart,
-        "empty_reason": empty_reason if is_empty_chart else "",
+        "request_id": request_id,
+        "chart_tag": _compact(final_spec.get("chart_tag")),
+        "should_insert": True,
+        "empty_reason": "",
+        "relative_path": markdown_target,
+        "absolute_path": str(target_path) if target_path else "",
+        "markdown": markdown,
+        "markdown_for_deepreport": markdown,
         "retrieval_plan": retrieval_plan,
-        "queries": queries,
-        "search_results": search_results,
-        "live_search_overview": live_search_overview,
-        "selected_live_docs": selected_live_doc_refs,
-        "docs_for_generation": generation_refs,
-        "knowledges": knowledges,
-        "facts": knowledges,
-        "references": generation_refs,
+        "queries": retrieval_plan.get("queries") or [],
+        "docs_for_generation": docs_for_generation,
         "chart_decision_debug": {
-            "decision_mode": decision_mode,
-            "decision_error": decision_error,
-            "decision_raw_output": decision_raw_output,
+            "decision_mode": _compact(final_spec.get("_decision_mode")),
+            "decision_error": _compact(final_spec.get("_decision_error")),
+            "decision_raw_output": _compact(final_spec.get("_decision_raw_output")),
         },
-        "generation_attempts": generation_attempts,
-        "retry_gap_report": gap_report,
         "debug_summary": {
-            "query_count": len(queries),
-            "existing_refs_count": len(task.get("existing_refs") or []),
-            "live_hits_count": live_hits_count,
-            "selected_live_docs_count": len(selected_live_docs),
+            "existing_refs_count": len(payload.get("existing_refs") or []),
+            "query_count": len(retrieval_plan.get("queries") or []),
+            "live_hits_count": sum(len(item.get("documents") or []) for item in search_results),
+            "selected_live_docs_count": len(live_docs),
             "docs_for_generation_count": len(docs_for_generation),
-            "knowledge_count": len(knowledges),
-            "chart_tag": chart_tag,
-            "decision_mode": decision_mode,
-            "used_agg_search": len(generation_attempts) > 1,
-            "attempt_count": len(generation_attempts),
-            "final_stage": _compact(generation_attempts[-1].get("stage")) if generation_attempts else "",
+            "chart_tag": _compact(final_spec.get("chart_tag")),
+            "decision_mode": _compact(final_spec.get("_decision_mode")),
         },
         **render_result,
     }
 
 
-__all__ = [
-    "plan_chart_retrieval",
-    "expand_queries",
-    "search_documents",
-    "prepare_live_docs_for_generation",
-    "merge_and_dedupe_knowledges",
-    "generate_chart_markdown",
-]
+__all__ = ["build_deepreport_review_payload", "generate_chart_for_deepreport"]

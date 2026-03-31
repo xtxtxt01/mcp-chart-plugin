@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import html
 import importlib.util
@@ -191,8 +191,8 @@ def _wrap_text(value: Any, max_line_chars: int = 12, max_lines: int = 3) -> list
             lines.append(current)
     if len(lines) > max_lines:
         lines = lines[:max_lines]
-        if not lines[-1].endswith("…"):
-            lines[-1] = (lines[-1][: max(1, max_line_chars - 1)] + "…").strip()
+        if not lines[-1].endswith("..."):
+            lines[-1] = (lines[-1][: max(1, max_line_chars - 3)] + "...").strip()
     return lines
 
 
@@ -276,10 +276,10 @@ def _build_echarts_snapshot_html(option: dict[str, Any]) -> str:
         "<!doctype html><html><head><meta charset='utf-8'/>"
         f"{_echarts_script_tag()}"
         "<style>"
-        "html,body{margin:0;padding:0;width:1200px;height:720px;background:#f6f8fb;overflow:hidden;}"
-        ".card{width:1136px;height:656px;margin:32px;border:1px solid #d9e2f2;border-radius:24px;background:#ffffff;"
+        "html,body{margin:0;padding:0;width:1200px;height:720px;background:#ffffff;overflow:hidden;}"
+        ".card{width:1200px;height:720px;margin:0;border:none;border-radius:0;background:#ffffff;"
         "box-sizing:border-box;overflow:hidden;}"
-        "#chart{width:1136px;height:656px;}"
+        "#chart{width:1200px;height:720px;}"
         "</style></head><body>"
         "<div class='card'><div id='chart'></div></div>"
         "<script>"
@@ -296,7 +296,7 @@ def _build_svg_snapshot_html(svg_markup: str) -> str:
     return (
         "<!doctype html><html><head><meta charset='utf-8'/>"
         "<style>"
-        "html,body{margin:0;padding:0;width:1200px;height:720px;background:#f6f8fb;overflow:hidden;}"
+        "html,body{margin:0;padding:0;width:1200px;height:720px;background:#ffffff;overflow:hidden;}"
         ".frame{width:1200px;height:720px;overflow:hidden;}"
         "svg{display:block;width:1200px;height:720px;}"
         "</style></head><body>"
@@ -564,10 +564,10 @@ def _render_pie_svg(title: str, chart_data: dict[str, Any]) -> str:
     outer_radius = 180.0
     inner_radius = 96.0
     parts = _svg_frame(title)
-    parts.append(_render_multiline_text(cx, cy - 14, ["总量", _format_number(total)], font_size=24, weight="700"))
+    parts.append(_render_multiline_text(cx, cy - 14, ["鎬婚噺", _format_number(total)], font_size=24, weight="700"))
 
     parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{inner_radius - 10:.1f}" fill="#ffffff"/>')
-    parts.append(_render_multiline_text(cx, cy - 14, ["总量", _format_number(total)], font_size=24, weight="700"))
+    parts.append(_render_multiline_text(cx, cy - 14, ["鎬婚噺", _format_number(total)], font_size=24, weight="700"))
     start_angle = -math.pi / 2
     legend_x = 670.0
     legend_y = 165.0
@@ -1118,7 +1118,7 @@ def build_no_chart_result(spec: dict[str, Any], request_id: str, title: str) -> 
     svg_markup = _render_empty_svg(title, str(spec.get("explain") or spec.get("_decision_error") or "No chart will be inserted."))
     payload = _render_utils.write_result_bundle(
         OUTPUTS_ROOT,
-        "mcp_demo_chart",
+        "chart_plugin_mcp",
         request_id,
         raw_xml,
         extra={
@@ -1126,9 +1126,9 @@ def build_no_chart_result(spec: dict[str, Any], request_id: str, title: str) -> 
             "preview_html": _build_svg_preview_snippet(svg_markup),
         },
     )
-    txt_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.txt"
-    json_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.json"
-    html_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.html"
+    txt_path = OUTPUTS_ROOT / f"chart_plugin_mcp__{request_id}.txt"
+    json_path = OUTPUTS_ROOT / f"chart_plugin_mcp__{request_id}.json"
+    html_path = OUTPUTS_ROOT / f"chart_plugin_mcp__{request_id}.html"
     return {
         "success": True,
         "raw_xml": raw_xml,
@@ -1158,7 +1158,7 @@ def render_chart_artifacts(spec: dict[str, Any], request_id: str, title: str) ->
 
     payload = _render_utils.write_result_bundle(
         OUTPUTS_ROOT,
-        "mcp_demo_chart",
+        "chart_plugin_mcp",
         request_id,
         raw_xml,
         extra=extra,
@@ -1170,9 +1170,9 @@ def render_chart_artifacts(spec: dict[str, Any], request_id: str, title: str) ->
         svg_markup = _build_chart_svg(title, spec)
         chart_path = _render_svg_markup_png(request_id=request_id, svg_markup=svg_markup)
 
-    txt_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.txt"
-    json_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.json"
-    html_path = OUTPUTS_ROOT / f"mcp_demo_chart__{request_id}.html"
+    txt_path = OUTPUTS_ROOT / f"chart_plugin_mcp__{request_id}.txt"
+    json_path = OUTPUTS_ROOT / f"chart_plugin_mcp__{request_id}.json"
+    html_path = OUTPUTS_ROOT / f"chart_plugin_mcp__{request_id}.html"
     return {
         "success": True,
         "raw_xml": raw_xml,
@@ -1185,3 +1185,5 @@ def render_chart_artifacts(spec: dict[str, Any], request_id: str, title: str) ->
         "html_path": relative_to_demo(html_path),
         "markdown": f"![{title}]({relative_to_demo(chart_path)})",
     }
+
+

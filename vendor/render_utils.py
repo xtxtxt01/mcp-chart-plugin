@@ -902,8 +902,10 @@ def _funnel_option(chart_data: dict) -> dict:
                     "top": 96,
                     "bottom": 76,
                     "width": "72%",
+                    "minSize": "0%",
+                    "maxSize": "100%",
                     "sort": "descending",
-                    "gap": 4,
+                    "gap": 2,
                     "label": {"position": "inside"},
                     "data": funnel_data,
                 }
